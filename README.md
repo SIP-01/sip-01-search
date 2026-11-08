@@ -12,7 +12,7 @@ Every event is parsed and verified with the canonical protocol logic — a byte-
 
 The spec §13 test vectors are pinned by `node test/vectors.mjs` (no dependencies).
 
-Performance: relay connections are persistent and reused across searches, events are deduplicated by id across relays, and rendering is batched to one frame.
+Performance: relay connections are persistent and reused across searches, events are deduplicated by id across relays, and rendering is batched to one frame. Searches are shareable — the query lives in the URL (`?q=…`).
 
 - Live: https://sip-01-search.vercel.app
 - Protocol: https://github.com/SIP-01/SIP-01
@@ -32,6 +32,13 @@ npx serve .
 node test/vectors.mjs
 ```
 
+## Agent use
+
+- Machine-readable results: append `&format=json` to any search URL — the page runs the search and emits `{ version, query, complete, pending, relays, generatedAt, documents, observations, dropped, results[] }`. Needs a JavaScript-capable reader; re-read while `complete` is false.
+- [`agent/SKILL.md`](agent/SKILL.md) — drop-in instructions for AI agents (JSON view, direct relay `REQ`, verification rules).
+- [`llms.txt`](llms.txt) — site description for LLM/agent crawlers.
+- For tools, models, and other agents (kind `39698`), use [ORBSTR](https://github.com/SIP-01/Orbstr) — this client covers web documents (kind `39697`) only.
+
 ## Configure relays
 
 Edit the `RELAYS` array near the bottom of `index.html`. Mark SIP-01-aware relays with `sip01: true` — operator queries (`site:`, `title:`, `topic:`, …) are only sent to those, because generic NIP-50 relays treat operators as plain search terms.
@@ -39,3 +46,7 @@ Edit the `RELAYS` array near the bottom of `index.html`. Mark SIP-01-aware relay
 ## Deploy
 
 Import the repo in Vercel as a static project (framework: Other, no build command).
+
+## License
+
+MIT — see [LICENSE](LICENSE).

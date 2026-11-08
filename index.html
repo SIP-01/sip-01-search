@@ -74,6 +74,7 @@ main { max-width: 720px; margin: 0 auto; padding: 20px 16px 60px; }
 }
 .badge.agree { border-color: var(--accent-dim); color: var(--accent); }
 .empty { color: var(--muted); text-align: center; padding: 40px 0; }
+.json { white-space: pre-wrap; word-break: break-word; font-size: 12px; margin: 0; }
 footer { text-align: center; color: var(--muted); font-size: 11px; padding: 20px; }
 a.foot { color: var(--muted); }
 </style>
@@ -96,7 +97,9 @@ a.foot { color: var(--muted); }
 <footer>
   No central server — this page connects straight to public relays. Protocol:
   <a class="foot" href="https://github.com/SIP-01/SIP-01" target="_blank" rel="noopener">SIP-01/SIP-01</a> ·
-  Core: <a class="foot" href="https://github.com/SIP-01/sip-01-core" target="_blank" rel="noopener">sip-01-core</a>
+  Core: <a class="foot" href="https://github.com/SIP-01/sip-01-core" target="_blank" rel="noopener">sip-01-core</a> ·
+  Agents &amp; tools: <a class="foot" href="https://github.com/SIP-01/Orbstr" target="_blank" rel="noopener">ORBSTR</a><br>
+  Agents: append <code>&amp;format=json</code> to any search URL for machine-readable results.
 </footer>
 <script>
 /* === SIP-01 protocol: byte-compatible consumer port of sip-01-core src/protocol/webIndex.ts ===
@@ -233,6 +236,21 @@ const $results = document.getElementById('results');
 const $q = document.getElementById('q');
 const $go = document.getElementById('go');
 
+// Machine-readable mode for agents: ?q=<query>&format=json renders the verified
+// results as a JSON document instead of the UI (schema documented in agent/SKILL.md).
+const params = new URLSearchParams(location.search);
+const jsonMode = params.get('format') === 'json';
+const initialQuery = (params.get('q') || '').trim();
+let $json = null;
+if (jsonMode) {
+  document.querySelector('header').style.display = 'none';
+  document.querySelector('footer').style.display = 'none';
+  $results.innerHTML = '<pre class="json"></pre>';
+  $json = $results.firstChild;
+} else if (initialQuery) {
+  $q.value = initialQuery;
+}
+
 let docs = new Map();       // d → { url, title, description, source, latest, indexers:Set, xAgree:Map }
 let seen = new Set();       // event ids, deduped across relays (per search)
 let stats = { observations: 0, dropped: 0 };
@@ -241,7 +259,7 @@ let currentQuery = '';
 let renderQueued = false;
 
 // Persistent relay pool — sockets are opened once and reused across searches.
-const pool = RELAYS.map(r => ({ url: r.url, sip01: r.sip01, ws: null, retry: 0, timer: null, eose: false, closed: false, active: false }));
+const pool = RELAYS.map(r => ({ url: r.url, sip01: r.sip01, ws: null, retry: 0, timer: null, eose: false, closed: false, active: false, delivered: false }));
 
 function subId() { return 'sip01-' + searchToken; }
 
@@ -264,6 +282,7 @@ function connect(relay) {
       relay.closed = true; // count it as done for this search; retry in the background
       scheduleReconnect(relay);
       updateStatus();
+      scheduleRender();
     }
   };
 }
@@ -287,8 +306,8 @@ function handleMessage(relay, msg) {
   let data;
   try { data = JSON.parse(msg.data); } catch (e) { return; }
   if (!Array.isArray(data) || data[1] !== subId()) return; // stale sub from an earlier search
-  if (data[0] === 'EVENT') onEvent(data[2]);
-  else if (data[0] === 'EOSE' || data[0] === 'CLOSED') { relay.eose = true; updateStatus(); }
+  if (data[0] === 'EVENT') { relay.delivered = true; onEvent(data[2]); }
+  else if (data[0] === 'EOSE' || data[0] === 'CLOSED') { relay.eose = true; updateStatus(); scheduleRender(); }
 }
 
 function onEvent(ev) {
@@ -313,7 +332,7 @@ function onEvent(ev) {
 function addObservation(obs) {
   let entry = docs.get(obs.d);
   if (!entry) {
-    entry = { url: obs.url, title: obs.title, description: obs.description, source: obs.source, latest: 0, indexers: new Set(), xAgree: new Map() };
+    entry = { d: obs.d, url: obs.url, title: obs.title, description: obs.description, source: obs.source, latest: 0, indexers: new Set(), xAgree: new Map() };
     docs.set(obs.d, entry);
   }
   entry.indexers.add(obs.indexer);
@@ -340,6 +359,7 @@ function scheduleRender() {
 }
 
 function render() {
+  if (jsonMode) { renderJson(); return; }
   const items = [...docs.values()].sort((a, b) =>
     b.indexers.size - a.indexers.size || b.latest - a.latest
   );
@@ -365,10 +385,41 @@ function render() {
   updateStatus();
 }
 
+// JSON view for agents — same verified data, machine-readable (schema in agent/SKILL.md).
+function renderJson() {
+  if (!$json) return;
+  const active = pool.filter(r => r.active);
+  const pending = active.filter(r => !(r.eose || r.closed)).length;
+  const results = [...docs.values()]
+    .sort((a, b) => b.indexers.size - a.indexers.size || b.latest - a.latest)
+    .map(it => {
+      let x, xIndexers = 0;
+      for (const [hash, set] of it.xAgree) if (set.size > xIndexers) { x = hash; xIndexers = set.size; }
+      const out = { url: it.url, title: it.title, d: it.d, indexers: it.indexers.size, observedAt: it.latest };
+      if (it.description) out.description = it.description;
+      if (it.source) out.source = it.source;
+      if (x) { out.x = x; out.xIndexers = xIndexers; }
+      return out;
+    });
+  $json.textContent = JSON.stringify({
+    version: 1,
+    query: currentQuery,
+    complete: pending === 0,
+    pending,
+    relays: active.map(r => ({ url: r.url, delivered: r.delivered })),
+    generatedAt: Math.floor(Date.now() / 1000),
+    documents: docs.size,
+    observations: stats.observations,
+    dropped: stats.dropped,
+    results,
+  }, null, 2);
+}
+
 function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function escapeAttr(s) { return escapeHtml(s); }
 
 function updateStatus() {
+  if (jsonMode) return; // the JSON view refreshes via renderJson()
   const active = pool.filter(r => r.active);
   const pending = active.filter(r => !(r.eose || r.closed));
   if (pending.length) {
@@ -380,20 +431,28 @@ function updateStatus() {
     return;
   }
   $go.disabled = false;
+  const delivered = active.filter(r => r.delivered).length;
+  const from = delivered === active.length ? `${active.length} relays` : `${delivered} of ${active.length} relays`;
   if (docs.size === 0) {
-    $status.textContent = `No matches from ${active.length} relays.`;
+    $status.textContent = `No matches from ${from}.`;
   } else {
     const parts = [`${docs.size} document${docs.size === 1 ? '' : 's'}`];
     if (stats.observations) parts.push(`${stats.observations} verified observation${stats.observations === 1 ? '' : 's'}`);
     if (stats.dropped) parts.push(`${stats.dropped} invalid dropped`);
-    $status.textContent = `${parts.join(' · ')} from ${active.length} relays.`;
+    $status.textContent = `${parts.join(' · ')} from ${from}.`;
   }
   if (!CAN_VERIFY) $status.textContent += ' Hash verification unavailable in this context.';
+}
+
+function syncUrl(query) {
+  if (jsonMode) return;
+  history.replaceState(null, '', query ? `${location.pathname}?q=${encodeURIComponent(query)}` : location.pathname);
 }
 
 function runSearch(query) {
   searchToken++;
   currentQuery = query;
+  syncUrl(query);
   const opQuery = OPERATOR_RE.test(query);
   docs = new Map();
   seen = new Set();
@@ -403,6 +462,7 @@ function runSearch(query) {
     relay.active = !opQuery || relay.sip01;
     relay.eose = !relay.active; // inactive relays count as done
     relay.closed = false;
+    relay.delivered = false;
     if (relay.ws && relay.ws.readyState === 1 && searchToken > 1) {
       try { relay.ws.send(JSON.stringify(['CLOSE', 'sip01-' + (searchToken - 1)])); } catch (e) {}
     }
@@ -416,8 +476,8 @@ function runSearch(query) {
 $go.addEventListener('click', () => runSearch($q.value.trim()));
 $q.addEventListener('keydown', (e) => { if (e.key === 'Enter') runSearch($q.value.trim()); });
 
-// Show the freshest items in the index on load.
-runSearch('');
+// Show the freshest items in the index on load (?q= pre-fills a search, ?format=json switches to the agent view).
+runSearch(initialQuery);
 </script>
 </body>
 </html>
