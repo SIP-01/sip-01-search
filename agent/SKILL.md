@@ -14,9 +14,10 @@ The page runs the search and outputs a JSON document:
 
     { version, query, complete, pending, relays, generatedAt,
       documents, observations, dropped,
-      results: [ { url, title, description?, d, x?, xIndexers?, indexers, source?, observedAt } ] }
+      results: [ { url, title, description?, d, x?, xIndexers?, indexers, indexerPubkeys, source?, observedAt } ] }
 
-- `relays` = `[{ url, delivered }]` — the relays queried, and whether each actually served events (a relay can be up but empty).
+- `relays` = `[{ url, name?, sip01, delivered }]` — the relays queried; `name` and `sip01` (operator support) come from each relay's NIP-11 document; `delivered` says whether it actually served events (a relay can be up but empty).
+- `indexerPubkeys` = hex pubkeys of the distinct indexers (encode as `npub` per NIP-19 for display). Distinct pubkeys = independent observations.
 - `complete: false` means relays are still streaming — re-read until true.
 - `indexers` = distinct pubkeys that published a verified observation for the document (the rank signal).
 - `x` + `xIndexers` = the content hash most indexers agree on, and how many agree on it.
@@ -32,6 +33,8 @@ Relays this client uses (all NIP-50):
 - `wss://sip-relay-2.sip-booster-relay.workers.dev`
 - `wss://sip-relay-4.sip-relay-4.workers.dev`
 - `wss://relay.ditto.pub`
+
+Relay capabilities come from each relay's NIP-11 document (`supported_nips`, `uncaged_index`); the client checks it before sending operators.
 
 SIP-01-aware relays (the three UNCAGED nodes) also accept operators: `site:`, `domain:`, `url:`, `inurl:`, `title:`, `topic:`, `type:`, `platform:`, `category:`, `network:`, `country:`, `mime:`, `filetype:`, `source:`, `lang:`, `before:`, `after:`, `distinct:domain` — each with a negated `-op:` form. Send operators only to SIP-01-aware relays; generic NIP-50 relays treat them as plain terms.
 

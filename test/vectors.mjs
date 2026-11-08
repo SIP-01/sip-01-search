@@ -10,7 +10,7 @@ if (!block) {
   process.exit(1);
 }
 const P = new Function(`${block[0]}
-return { normalizeIndexUrl, documentId, contentHash, parseIndexEvent, verifyObservation };`)();
+return { normalizeIndexUrl, documentId, contentHash, parseIndexEvent, verifyObservation, npubEncode };`)();
 
 let checks = 0;
 const eq = (actual, expected, msg) => { assert.equal(actual, expected, msg); checks++; };
@@ -30,6 +30,10 @@ for (const [input, normalized, d] of URL_VECTORS) {
 // --- §13.2 content identity vectors ---
 eq(await P.contentHash('Example'), 'e1762f14d9924e37b32f1c81dfd256410af462f5136415c96877efa8c80345d0', 'x Example');
 eq(await P.contentHash('Example Page', 'A page about examples.'), '2a5cbdf44513f552fb571d6c6de2ddf16c5452b235cc887980b52898fb38e7c1', 'x Example Page');
+
+// --- NIP-19 display vectors (real pubkeys → npub) ---
+eq(P.npubEncode('8b7f13da3ad25e5cf6ef747d53898d798f917b6161a1a181957aa888767aa685'), 'npub13dl38k366f09eah0w3748zvd0x8ez7mpvxs6rqv4025gsan656zsn3d3vd', 'npub UNCAGED node 3');
+eq(P.npubEncode('3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d'), 'npub180cvv07tjdrrgpa0j7j7tmnyl2yr6yr7l8j4s3evf6u64th6gkwsyjh6w6', 'npub fiatjaf');
 
 // --- normalization edge cases (mirror of sip-01-core unit tests) ---
 eq(P.normalizeIndexUrl('HTTPS://WWW.Example.COM/Page'), 'https://example.com/Page');

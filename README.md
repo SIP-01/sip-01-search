@@ -14,6 +14,8 @@ The spec §13 test vectors are pinned by `node test/vectors.mjs` (no dependencie
 
 Performance: relay connections are persistent and reused across searches, events are deduplicated by id across relays, and rendering is batched to one frame. Searches are shareable — the query lives in the URL (`?q=…`).
 
+Relay capabilities are discovered from each relay's NIP-11 document (`supported_nips`, `uncaged_index`) — operator queries only go to relays that advertise SIP-01 support, and the status line reports how many relays actually served events.
+
 - Live: https://sip-01-search.vercel.app
 - Protocol: https://github.com/SIP-01/SIP-01
 - Core library: https://github.com/SIP-01/sip-01-core
@@ -34,7 +36,7 @@ node test/vectors.mjs
 
 ## Agent use
 
-- Machine-readable results: append `&format=json` to any search URL — the page runs the search and emits `{ version, query, complete, pending, relays, generatedAt, documents, observations, dropped, results[] }`. Needs a JavaScript-capable reader; re-read while `complete` is false.
+- Machine-readable results: append `&format=json` to any search URL — the page runs the search and emits `{ version, query, complete, pending, relays, generatedAt, documents, observations, dropped, results[] }` (each result carries `indexerPubkeys` for independence checks). Needs a JavaScript-capable reader; re-read while `complete` is false.
 - [`agent/SKILL.md`](agent/SKILL.md) — drop-in instructions for AI agents (JSON view, direct relay `REQ`, verification rules).
 - [`llms.txt`](llms.txt) — site description for LLM/agent crawlers.
 - For tools, models, and other agents (kind `39698`), use [ORBSTR](https://github.com/SIP-01/Orbstr) — this client covers web documents (kind `39697`) only.
