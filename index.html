@@ -55,6 +55,8 @@ button {
   color: #14171c; font-weight: 600; cursor: pointer; font-size: 14px;
 }
 button:disabled { opacity: 0.5; cursor: default; }
+.hint { max-width: 640px; margin: 10px auto 0; padding: 0 16px; color: var(--muted); font-size: 12px; }
+.hint code { background: var(--panel); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; font-size: 11px; }
 main { max-width: 720px; margin: 0 auto; padding: 20px 16px 60px; }
 .status { color: var(--muted); font-size: 13px; margin-bottom: 14px; min-height: 18px; }
 .result {
@@ -85,6 +87,7 @@ a.foot { color: var(--muted); }
     <input id="q" type="text" placeholder="Search the index…" autocomplete="off">
     <button id="go">Search</button>
   </div>
+  <div class="hint">SIP-01 relays support operators — try <code>site:example.com</code> <code>title:nostr</code> <code>topic:privacy</code></div>
 </header>
 <main>
   <div class="status" id="status"></div>
@@ -92,46 +95,248 @@ a.foot { color: var(--muted); }
 </main>
 <footer>
   No central server — this page connects straight to public relays. Protocol:
-  <a class="foot" href="https://github.com/SIP-01/SIP-01" target="_blank" rel="noopener">SIP-01/SIP-01</a>
+  <a class="foot" href="https://github.com/SIP-01/SIP-01" target="_blank" rel="noopener">SIP-01/SIP-01</a> ·
+  Core: <a class="foot" href="https://github.com/SIP-01/sip-01-core" target="_blank" rel="noopener">sip-01-core</a>
 </footer>
 <script>
+/* === SIP-01 protocol: byte-compatible consumer port of sip-01-core src/protocol/webIndex.ts ===
+   Spec: https://github.com/SIP-01/SIP-01 (§7 normalization, §8 content hash, §13 vectors).
+   Build/publish path omitted — this client never publishes. Pinned by test/vectors.mjs. */
+const WEB_INDEX_KIND = 39697;
+const WEB_INDEX_SCHEMA_VERSION = '1';
+const WEB_INDEX_D_PREFIX = 'widx:';
+const MAX_URL_LEN = 2048;
+const MAX_TITLE_LEN = 300;
+const MAX_DESCRIPTION_LEN = 1000;
+const MAX_IMAGE_LEN = 2048;
+const MAX_TAGS = 8;
+const TOPIC_RE = /^[a-z0-9][a-z0-9-]{0,99}$/;
+const LANGUAGE_RE = /^[a-z]{2}$/;
+const EXTENSION_TAGS = ['type', 'platform', 'category', 'network', 'role', 'proto', 'country', 'mime'];
+const TRACKING_PARAMS = new Set([
+  'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content',
+  'fbclid', 'gclid', 'dclid', 'mc_cid', 'mc_eid', 'igshid', 'ref_src', 'spm', 'si',
+]);
+
+function normalizeIndexUrl(input) {
+  let url;
+  try { url = new URL(String(input).trim()); } catch (e) { return null; }
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') return null;
+  // Lowercase host handled by URL; strip leading www.
+  url.hostname = url.hostname.replace(/^www\./, '');
+  // Default ports.
+  if ((url.protocol === 'http:' && url.port === '80') ||
+      (url.protocol === 'https:' && url.port === '443')) url.port = '';
+  // Fragment never identifies content for indexing purposes.
+  url.hash = '';
+  // Strip tracking params, keep everything else, sort deterministically (stable for duplicate keys).
+  const params = [...url.searchParams.entries()]
+    .filter(([key]) => !TRACKING_PARAMS.has(key.toLowerCase()))
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  url.search = '';
+  for (const [key, value] of params) url.searchParams.append(key, value);
+  // Trailing slash on non-root paths.
+  if (url.pathname.length > 1 && url.pathname.endsWith('/')) url.pathname = url.pathname.slice(0, -1);
+  return url.toString();
+}
+
+const shaCache = new Map(); // input → hex digest; repeat URLs/contents are cheap
+async function sha256Hex(text) {
+  const hit = shaCache.get(text);
+  if (hit) return hit;
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+  const hex = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+  if (shaCache.size > 4096) shaCache.clear();
+  shaCache.set(text, hex);
+  return hex;
+}
+
+async function documentId(normalizedUrl) {
+  const hex = await sha256Hex(normalizedUrl);
+  return `${WEB_INDEX_D_PREFIX}${hex.slice(0, 32)}`;
+}
+
+async function contentHash(title, description = '') {
+  return sha256Hex(`${title}\n${description}`);
+}
+
+function getTag(event, name) {
+  return event.tags.find(([n]) => n === name)?.[1];
+}
+
+function parseIndexEvent(event) {
+  if (!event || event.kind !== WEB_INDEX_KIND) return null;
+  const d = getTag(event, 'd');
+  const url = getTag(event, 'u');
+  const version = getTag(event, 'v');
+  if (!d || !d.startsWith(WEB_INDEX_D_PREFIX) || !url || version !== WEB_INDEX_SCHEMA_VERSION) return null;
+  if (url.length > MAX_URL_LEN) return null;
+  const normalized = normalizeIndexUrl(url);
+  if (!normalized) return null;
+  let title, description, image;
+  try {
+    const parsed = JSON.parse(event.content);
+    title = typeof parsed.title === 'string' ? parsed.title.trim().slice(0, MAX_TITLE_LEN) : '';
+    description = typeof parsed.description === 'string' ? parsed.description.trim().slice(0, MAX_DESCRIPTION_LEN) : '';
+    if (typeof parsed.image === 'string' && /^https:\/\//i.test(parsed.image)) image = parsed.image.slice(0, MAX_IMAGE_LEN);
+  } catch (e) { return null; }
+  if (!title) return null;
+  const topics = event.tags.filter(([n]) => n === 't').map(([, v]) => v).filter((v) => TOPIC_RE.test(v)).slice(0, MAX_TAGS);
+  const language = getTag(event, 'l');
+  const publishedTag = getTag(event, 'published');
+  const published = publishedTag ? parseInt(publishedTag, 10) : NaN;
+  const extensions = {};
+  for (const name of EXTENSION_TAGS) {
+    const value = getTag(event, name);
+    if (value !== undefined) extensions[name] = value;
+  }
+  return {
+    d, url: normalized, title, description, image, topics,
+    language: language && LANGUAGE_RE.test(language) ? language : undefined,
+    contentHash: getTag(event, 'x'),
+    published: Number.isFinite(published) ? published : undefined,
+    source: getTag(event, 'source'),
+    extensions,
+    observedAt: event.created_at,
+    indexer: event.pubkey,
+  };
+}
+
+async function verifyObservation(obs) {
+  const expectedD = await documentId(obs.url);
+  if (obs.d !== expectedD) return false;
+  if (obs.contentHash) {
+    const expectedX = await contentHash(obs.title, obs.description);
+    if (obs.contentHash !== expectedX) return false;
+  }
+  return true;
+}
+/* === end SIP-01 protocol === */
+
+/* === App === */
+// sip01: true = SIP-01-aware relay (validating ingestion + NIP-50 operators, per its NIP-11
+// uncaged_index block). Operator queries are only sent to these; plain queries go to all.
 const RELAYS = [
-  "wss://relay-na1.metanomalist.com",
-  "wss://relay.damus.io",
-  "wss://nos.lol"
+  { url: "wss://sip-relay-3.uncaged-sip.workers.dev", sip01: true },
+  { url: "wss://sip-relay-2.sip-booster-relay.workers.dev", sip01: true },
+  { url: "wss://sip-relay-4.sip-relay-4.workers.dev", sip01: true },
+  { url: "wss://relay.ditto.pub", sip01: false }
 ];
-const KIND = 39697;
+// Spec §15 operators (each with a negated -op: form); generic NIP-50 relays would treat
+// these as plain terms, so they only go to sip01 relays.
+const OPERATOR_RE = /(^|\s)-?(site|domain|url|inurl|title|topic|type|platform|category|network|country|mime|filetype|source|lang|before|after|distinct):/;
+const SEARCH_LIMIT = 40;
+const CAN_VERIFY = typeof crypto !== 'undefined' && !!crypto.subtle;
+
 const $status = document.getElementById('status');
 const $results = document.getElementById('results');
 const $q = document.getElementById('q');
 const $go = document.getElementById('go');
 
-let docs = new Map(); // d-tag -> { title, description, url, lang, source, indexers:Set, latest }
-let sockets = [];
+let docs = new Map();       // d → { url, title, description, source, latest, indexers:Set, xAgree:Map }
+let seen = new Set();       // event ids, deduped across relays (per search)
+let stats = { observations: 0, dropped: 0 };
 let searchToken = 0;
+let currentQuery = '';
+let renderQueued = false;
 
-function tagVal(tags, key) {
-  const t = tags.find(t => t[0] === key);
-  return t ? t[1] : undefined;
+// Persistent relay pool — sockets are opened once and reused across searches.
+const pool = RELAYS.map(r => ({ url: r.url, sip01: r.sip01, ws: null, retry: 0, timer: null, eose: false, closed: false, active: false }));
+
+function subId() { return 'sip01-' + searchToken; }
+
+function connect(relay) {
+  if (relay.ws && (relay.ws.readyState === 0 || relay.ws.readyState === 1)) return;
+  let ws;
+  try { ws = new WebSocket(relay.url); } catch (e) { scheduleReconnect(relay); return; }
+  relay.ws = ws;
+  ws.onopen = () => {
+    if (relay.ws !== ws) return;
+    relay.retry = 0;
+    if (!relay.eose) sendReq(relay); // catch up on the active search
+  };
+  ws.onmessage = (msg) => handleMessage(relay, msg);
+  ws.onerror = () => { try { ws.close(); } catch (e) {} };
+  ws.onclose = () => {
+    if (relay.ws !== ws) return;
+    relay.ws = null;
+    if (!relay.eose) {
+      relay.closed = true; // count it as done for this search; retry in the background
+      scheduleReconnect(relay);
+      updateStatus();
+    }
+  };
 }
 
-function handleEvent(ev) {
-  let d = tagVal(ev.tags, 'd');
-  const u = tagVal(ev.tags, 'u');
-  if (!d || !u) return;
-  let parsed = {};
-  try { parsed = JSON.parse(ev.content || '{}'); } catch (e) { return; }
-  const entry = docs.get(d) || {
-    title: parsed.title || u, description: parsed.description || '',
-    url: u, source: tagVal(ev.tags, 'source') || '?', indexers: new Set(), latest: 0
-  };
-  entry.indexers.add(ev.pubkey);
-  if (ev.created_at > entry.latest) {
-    entry.latest = ev.created_at;
-    if (parsed.title) entry.title = parsed.title;
-    if (parsed.description) entry.description = parsed.description;
+function scheduleReconnect(relay) {
+  clearTimeout(relay.timer);
+  const delay = Math.min(15000, 1000 * 2 ** relay.retry);
+  relay.retry++;
+  relay.timer = setTimeout(() => connect(relay), delay);
+}
+
+function sendReq(relay) {
+  if (!relay.ws || relay.ws.readyState !== 1) return;
+  const filter = currentQuery
+    ? { kinds: [WEB_INDEX_KIND], search: currentQuery, limit: SEARCH_LIMIT }
+    : { kinds: [WEB_INDEX_KIND], limit: SEARCH_LIMIT };
+  relay.ws.send(JSON.stringify(['REQ', subId(), filter]));
+}
+
+function handleMessage(relay, msg) {
+  let data;
+  try { data = JSON.parse(msg.data); } catch (e) { return; }
+  if (!Array.isArray(data) || data[1] !== subId()) return; // stale sub from an earlier search
+  if (data[0] === 'EVENT') onEvent(data[2]);
+  else if (data[0] === 'EOSE' || data[0] === 'CLOSED') { relay.eose = true; updateStatus(); }
+}
+
+function onEvent(ev) {
+  if (!ev || !ev.id || seen.has(ev.id)) return;
+  seen.add(ev.id);
+  const token = searchToken;
+  let obs = null;
+  try { obs = parseIndexEvent(ev); } catch (e) { obs = null; }
+  if (!obs) { stats.dropped++; scheduleRender(); return; }
+  if (!CAN_VERIFY) { addObservation(obs); scheduleRender(); return; }
+  verifyObservation(obs).then(ok => {
+    if (token !== searchToken) return;
+    if (ok) addObservation(obs); else stats.dropped++;
+    scheduleRender();
+  }).catch(() => {
+    if (token !== searchToken) return;
+    stats.dropped++;
+    scheduleRender();
+  });
+}
+
+function addObservation(obs) {
+  let entry = docs.get(obs.d);
+  if (!entry) {
+    entry = { url: obs.url, title: obs.title, description: obs.description, source: obs.source, latest: 0, indexers: new Set(), xAgree: new Map() };
+    docs.set(obs.d, entry);
   }
-  docs.set(d, entry);
+  entry.indexers.add(obs.indexer);
+  if (obs.contentHash) {
+    let set = entry.xAgree.get(obs.contentHash);
+    if (!set) { set = new Set(); entry.xAgree.set(obs.contentHash, set); }
+    set.add(obs.indexer);
+  }
+  if (obs.observedAt >= entry.latest) {
+    entry.latest = obs.observedAt;
+    entry.title = obs.title;
+    entry.description = obs.description;
+    if (obs.source) entry.source = obs.source;
+  }
+  stats.observations++;
+}
+
+function scheduleRender() {
+  if (renderQueued) return;
+  renderQueued = true;
+  const run = () => { renderQueued = false; render(); };
+  // rAF batches to one frame when visible; hidden tabs throttle rAF to zero, so fall back to a timer.
+  if (document.hidden) setTimeout(run, 0); else requestAnimationFrame(run);
 }
 
 function render() {
@@ -140,84 +345,72 @@ function render() {
   );
   if (items.length === 0) {
     $results.innerHTML = '<div class="empty">No results yet — try a broader term, or give relays a moment.</div>';
-    return;
-  }
-  $results.innerHTML = items.map(it => `
+  } else {
+    $results.innerHTML = items.map(it => {
+      let xBest = 0;
+      for (const set of it.xAgree.values()) xBest = Math.max(xBest, set.size);
+      return `
     <div class="result">
       <div class="result-url">${escapeHtml(it.url)}</div>
       <div class="result-title"><a href="${escapeAttr(it.url)}" target="_blank" rel="noopener">${escapeHtml(it.title)}</a></div>
       ${it.description ? `<div class="result-desc">${escapeHtml(it.description)}</div>` : ''}
       <div class="badges">
         <span class="badge agree">${it.indexers.size} indexer${it.indexers.size === 1 ? '' : 's'} agree</span>
-        <span class="badge">${escapeHtml(it.source)}</span>
+        ${xBest >= 2 ? `<span class="badge" title="${xBest} indexers reported the same content hash (x)">content ✓</span>` : ''}
+        ${it.source ? `<span class="badge">${escapeHtml(it.source)}</span>` : ''}
       </div>
-    </div>
-  `).join('');
+    </div>`;
+    }).join('');
+  }
+  updateStatus();
 }
 
 function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function escapeAttr(s) { return escapeHtml(s); }
 
-function closeAll() {
-  sockets.forEach(ws => { try { ws.close(); } catch (e) {} });
-  sockets = [];
+function updateStatus() {
+  const active = pool.filter(r => r.active);
+  const pending = active.filter(r => !(r.eose || r.closed));
+  if (pending.length) {
+    const connecting = pending.filter(r => !(r.ws && r.ws.readyState === 1)).length;
+    $status.textContent = connecting
+      ? `Connecting to ${connecting} relay(s)…`
+      : `Waiting on ${pending.length} relay(s)…`;
+    $go.disabled = true;
+    return;
+  }
+  $go.disabled = false;
+  if (docs.size === 0) {
+    $status.textContent = `No matches from ${active.length} relays.`;
+  } else {
+    const parts = [`${docs.size} document${docs.size === 1 ? '' : 's'}`];
+    if (stats.observations) parts.push(`${stats.observations} verified observation${stats.observations === 1 ? '' : 's'}`);
+    if (stats.dropped) parts.push(`${stats.dropped} invalid dropped`);
+    $status.textContent = `${parts.join(' · ')} from ${active.length} relays.`;
+  }
+  if (!CAN_VERIFY) $status.textContent += ' Hash verification unavailable in this context.';
 }
 
 function runSearch(query) {
-  const token = ++searchToken;
-  closeAll();
+  searchToken++;
+  currentQuery = query;
+  const opQuery = OPERATOR_RE.test(query);
   docs = new Map();
+  seen = new Set();
+  stats = { observations: 0, dropped: 0 };
   render();
-  $status.textContent = `Connecting to ${RELAYS.length} relays…`;
-  $go.disabled = true;
-
-  let openCount = 0, eoseCount = 0;
-  const subId = 'sip01-' + Math.random().toString(36).slice(2, 9);
-
-  RELAYS.forEach(url => {
-    let ws;
-    try { ws = new WebSocket(url); } catch (e) { return; }
-    sockets.push(ws);
-    ws.onopen = () => {
-      if (token !== searchToken) return;
-      openCount++;
-      const filter = query
-        ? { kinds: [KIND], search: query, limit: 40 }
-        : { kinds: [KIND], limit: 40 };
-      ws.send(JSON.stringify(["REQ", subId, filter]));
-    };
-    ws.onmessage = (msg) => {
-      if (token !== searchToken) return;
-      let data;
-      try { data = JSON.parse(msg.data); } catch (e) { return; }
-      if (data[0] === "EVENT" && data[1] === subId) {
-        handleEvent(data[2]);
-        render();
-      } else if (data[0] === "EOSE" && data[1] === subId) {
-        eoseCount++;
-        try { ws.close(); } catch (e) {}
-        updateStatus(token, eoseCount);
-      }
-    };
-    ws.onerror = () => { try { ws.close(); } catch (e) {} };
-    ws.onclose = () => {
-      if (token !== searchToken) return;
-      eoseCount = Math.min(eoseCount + 1, RELAYS.length);
-      updateStatus(token, eoseCount);
-    };
-  });
-}
-
-function updateStatus(token, eoseCount) {
-  if (token !== searchToken) return;
-  if (eoseCount >= RELAYS.length) {
-    $status.textContent = docs.size
-      ? `${docs.size} document${docs.size === 1 ? '' : 's'} from ${RELAYS.length} relays.`
-      : `No matches from ${RELAYS.length} relays.`;
-    $go.disabled = false;
-  } else {
-    $status.textContent = `Waiting on ${RELAYS.length - eoseCount} relay(s)…`;
+  for (const relay of pool) {
+    relay.active = !opQuery || relay.sip01;
+    relay.eose = !relay.active; // inactive relays count as done
+    relay.closed = false;
+    if (relay.ws && relay.ws.readyState === 1 && searchToken > 1) {
+      try { relay.ws.send(JSON.stringify(['CLOSE', 'sip01-' + (searchToken - 1)])); } catch (e) {}
+    }
+    if (!relay.active) continue;
+    if (relay.ws && relay.ws.readyState === 1) sendReq(relay);
+    else connect(relay);
   }
+  updateStatus();
 }
 
 $go.addEventListener('click', () => runSearch($q.value.trim()));
