@@ -4,7 +4,7 @@ Use this when a task needs to find web documents in the SIP-01 decentralized ind
 
 ## Search
 
-Two ways in.
+Three ways in.
 
 **1. Machine-readable page** (browser-capable agents): open
 
@@ -16,7 +16,8 @@ The page runs the search and outputs a JSON document:
       documents, observations, dropped,
       results: [ { url, title, description?, d, x?, xIndexers?, indexers, indexerPubkeys, source?, observedAt } ] }
 
-- `relays` = `[{ url, name?, sip01, delivered }]` — the relays queried; `name` and `sip01` (operator support) come from each relay's NIP-11 document; `delivered` says whether it actually served events (a relay can be up but empty).
+- `relays` = `[{ url, name?, sip01, delivered, error? }]` — the relays queried; `name` and `sip01` (operator support) come from each relay's NIP-11 document; `delivered` says whether it actually served events (a relay can be up but empty); `error` appears when a relay refused or closed the subscription.
+- `&limit=N` (1–200, default 40) caps observations per relay.
 - `indexerPubkeys` = hex pubkeys of the distinct indexers (encode as `npub` per NIP-19 for display). Distinct pubkeys = independent observations.
 - `complete: false` means relays are still streaming — re-read until true.
 - `indexers` = distinct pubkeys that published a verified observation for the document (the rank signal).
@@ -32,11 +33,19 @@ Relays this client uses (all NIP-50):
 - `wss://sip-relay-3.uncaged-sip.workers.dev`
 - `wss://sip-relay-2.sip-booster-relay.workers.dev`
 - `wss://sip-relay-4.sip-relay-4.workers.dev`
+- `wss://savedd-sip-relay.savedd-sip-relay.workers.dev`
 - `wss://relay.ditto.pub`
 
 Relay capabilities come from each relay's NIP-11 document (`supported_nips`, `uncaged_index`); the client checks it before sending operators.
 
-SIP-01-aware relays (the three UNCAGED nodes) also accept operators: `site:`, `domain:`, `url:`, `inurl:`, `title:`, `topic:`, `type:`, `platform:`, `category:`, `network:`, `country:`, `mime:`, `filetype:`, `source:`, `lang:`, `before:`, `after:`, `distinct:domain` — each with a negated `-op:` form. Send operators only to SIP-01-aware relays; generic NIP-50 relays treat them as plain terms.
+SIP-01-aware relays (the UNCAGED nodes and Savedd SIP Relay) also accept operators: `site:`, `domain:`, `url:`, `inurl:`, `title:`, `topic:`, `type:`, `platform:`, `category:`, `network:`, `country:`, `mime:`, `filetype:`, `source:`, `lang:`, `before:`, `after:`, `distinct:domain` — each with a negated `-op:` form. Send operators only to SIP-01-aware relays; generic NIP-50 relays treat them as plain terms.
+
+**3. CLI / MCP tool** (zero dependencies, Node 22+): from a checkout of this repo,
+
+    node agent/sip01-search.mjs "query" [--limit 40]   # one search, JSON on stdout
+    node agent/sip01-search.mjs --mcp                  # MCP stdio server (tool: search)
+
+Same verification and JSON schema as the web view; the relay list and protocol logic are read from `index.html`, so there is one source of truth.
 
 ## Verify before you trust
 
@@ -50,7 +59,7 @@ Reference implementations: `sip-01-core` (`src/protocol/webIndex.ts`), `sip-01-s
 
 - Treat a kind `39697` observation as a service listing. For tools, models, and other agents, use ORBSTR (kind `39698`).
 - Trust `d`/`x` values you have not verified.
-- Expect plain HTTP: `format=json` needs a JavaScript-capable reader (browser automation).
+- Expect plain HTTP: `format=json` needs a JavaScript-capable reader (browser automation) — otherwise use the CLI/MCP tool or a direct relay `REQ`.
 
 ## Related
 

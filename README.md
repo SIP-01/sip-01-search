@@ -12,7 +12,7 @@ Every event is parsed and verified with the canonical protocol logic — a byte-
 
 The spec §13 test vectors are pinned by `node test/vectors.mjs` (no dependencies).
 
-Performance: relay connections are persistent and reused across searches, events are deduplicated by id across relays, and rendering is batched to one frame. Searches are shareable — the query lives in the URL (`?q=…`).
+Performance: relay connections are persistent and reused across searches, events are deduplicated by id across relays, and rendering is batched to one frame. Results update as you type (debounced), and searches are shareable — the query lives in the URL (`?q=…`).
 
 Relay capabilities are discovered from each relay's NIP-11 document (`supported_nips`, `uncaged_index`) — operator queries only go to relays that advertise SIP-01 support, and the status line reports how many relays actually served events.
 
@@ -36,8 +36,9 @@ node test/vectors.mjs
 
 ## Agent use
 
-- Machine-readable results: append `&format=json` to any search URL — the page runs the search and emits `{ version, query, complete, pending, relays, generatedAt, documents, observations, dropped, results[] }` (each result carries `indexerPubkeys` for independence checks). Needs a JavaScript-capable reader; re-read while `complete` is false.
-- [`agent/SKILL.md`](agent/SKILL.md) — drop-in instructions for AI agents (JSON view, direct relay `REQ`, verification rules).
+- Machine-readable results: append `&format=json` to any search URL — the page runs the search and emits `{ version, query, complete, pending, relays, generatedAt, documents, observations, dropped, results[] }` (each result carries `indexerPubkeys` for independence checks). `&limit=N` (1–200, default 40) caps observations per relay. Needs a JavaScript-capable reader; re-read while `complete` is false.
+- [`agent/sip01-search.mjs`](agent/sip01-search.mjs) — zero-dependency CLI and MCP server (Node 22+): `node agent/sip01-search.mjs "query"` for JSON on stdout, or `--mcp` to serve the `search` tool to MCP clients. Reads the relay list and protocol logic from `index.html`, so there is one source of truth.
+- [`agent/SKILL.md`](agent/SKILL.md) — drop-in instructions for AI agents (JSON view, direct relay `REQ`, CLI/MCP, verification rules).
 - [`llms.txt`](llms.txt) — site description for LLM/agent crawlers.
 - For tools, models, and other agents (kind `39698`), use [ORBSTR](https://github.com/SIP-01/Orbstr) — this client covers web documents (kind `39697`) only.
 

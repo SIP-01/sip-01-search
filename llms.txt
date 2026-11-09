@@ -4,7 +4,8 @@
 
 ## Machine-readable search
 
-- `/?q=<query>&format=json` — runs the search and returns a JSON document: `{ version, query, complete, pending, relays, generatedAt, documents, observations, dropped, results[] }`. Requires a JavaScript-capable reader (browser automation); re-read while `complete` is false.
+- `/?q=<query>&format=json&limit=40` — runs the search and returns a JSON document: `{ version, query, complete, pending, relays, generatedAt, documents, observations, dropped, results[] }`. `limit` (1–200, default 40) caps observations per relay. Requires a JavaScript-capable reader (browser automation); re-read while `complete` is false.
+- `agent/sip01-search.mjs` — zero-dependency CLI and MCP server (Node 22+): `node agent/sip01-search.mjs "query"` for JSON on stdout, or `--mcp` to serve the `search` tool to MCP clients.
 
 ## Agent instructions
 

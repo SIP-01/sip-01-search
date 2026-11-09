@@ -66,6 +66,7 @@ main { max-width: 720px; margin: 0 auto; padding: 20px 16px 60px; }
 .result-title { font-size: 16px; margin: 3px 0 4px; }
 .result-title a { color: var(--link); text-decoration: none; }
 .result-title a:hover { text-decoration: underline; }
+mark { background: transparent; color: var(--accent); }
 .result-desc { color: var(--text); font-size: 13.5px; opacity: 0.9; }
 .badges { margin-top: 6px; display: flex; gap: 6px; flex-wrap: wrap; }
 .badge {
@@ -270,12 +271,12 @@ const RELAYS = [
   { url: "wss://sip-relay-3.uncaged-sip.workers.dev", sip01: true },
   { url: "wss://sip-relay-2.sip-booster-relay.workers.dev", sip01: true },
   { url: "wss://sip-relay-4.sip-relay-4.workers.dev", sip01: true },
+  { url: "wss://savedd-sip-relay.savedd-sip-relay.workers.dev", sip01: true },
   { url: "wss://relay.ditto.pub", sip01: false }
 ];
 // Spec §15 operators (each with a negated -op: form); generic NIP-50 relays would treat
 // these as plain terms, so they only go to sip01 relays.
 const OPERATOR_RE = /(^|\s)-?(site|domain|url|inurl|title|topic|type|platform|category|network|country|mime|filetype|source|lang|before|after|distinct):/;
-const SEARCH_LIMIT = 40;
 const CAN_VERIFY = typeof crypto !== 'undefined' && !!crypto.subtle;
 
 const $status = document.getElementById('status');
@@ -287,6 +288,8 @@ const $go = document.getElementById('go');
 // results as a JSON document instead of the UI (schema documented in agent/SKILL.md).
 const params = new URLSearchParams(location.search);
 const jsonMode = params.get('format') === 'json';
+const limitParam = parseInt(params.get('limit'), 10);
+const SEARCH_LIMIT = Number.isFinite(limitParam) ? Math.min(Math.max(limitParam, 1), 200) : 40;
 const initialQuery = (params.get('q') || '').trim();
 let $json = null;
 if (jsonMode) {
@@ -374,7 +377,7 @@ function handleMessage(relay, msg) {
   try { data = JSON.parse(msg.data); } catch (e) { return; }
   if (!Array.isArray(data) || data[1] !== subId()) return; // stale sub from an earlier search
   if (data[0] === 'EVENT') { relay.delivered = true; onEvent(data[2]); }
-  else if (data[0] === 'EOSE' || data[0] === 'CLOSED') { relay.eose = true; updateStatus(); scheduleRender(); }
+  else if (data[0] === 'EOSE' || data[0] === 'CLOSED') { if (data[0] === 'CLOSED' && data[2]) relay.error = String(data[2]).slice(0, 160); relay.eose = true; updateStatus(); scheduleRender(); }
 }
 
 function onEvent(ev) {
@@ -430,6 +433,9 @@ function render() {
   const items = [...docs.values()].sort((a, b) =>
     b.indexers.size - a.indexers.size || b.latest - a.latest
   );
+  const terms = OPERATOR_RE.test(currentQuery)
+    ? []
+    : currentQuery.split(/\s+/).filter(w => w.length >= 3).slice(0, 4);
   if (items.length === 0) {
     $results.innerHTML = '<div class="empty">No results yet — try a broader term, or give relays a moment.</div>';
   } else {
@@ -443,8 +449,8 @@ function render() {
       return `
     <div class="result">
       <div class="result-url">${escapeHtml(it.url)}</div>
-      <div class="result-title"><a href="${escapeAttr(it.url)}" target="_blank" rel="noopener">${escapeHtml(it.title)}</a></div>
-      ${it.description ? `<div class="result-desc">${escapeHtml(it.description)}</div>` : ''}
+      <div class="result-title"><a href="${escapeAttr(it.url)}" target="_blank" rel="noopener">${highlight(it.title, terms)}</a></div>
+      ${it.description ? `<div class="result-desc">${highlight(it.description, terms)}</div>` : ''}
       <div class="badges">
         <span class="badge agree" title="${escapeAttr([...it.indexers].map(npubEncode).join('\n'))}">${it.indexers.size} indexer${it.indexers.size === 1 ? '' : 's'} agree</span>
         ${xBest >= 2 ? `<span class="badge" title="${xBest} indexers reported the same content hash (x)">content ✓</span>` : ''}
@@ -486,7 +492,7 @@ function renderJson() {
     query: currentQuery,
     complete: pending === 0,
     pending,
-    relays: active.map(r => ({ url: r.url, name: r.name, sip01: r.sip01, delivered: r.delivered })),
+    relays: active.map(r => ({ url: r.url, name: r.name, sip01: r.sip01, delivered: r.delivered, error: r.error })),
     generatedAt: Math.floor(Date.now() / 1000),
     documents: docs.size,
     observations: stats.observations,
@@ -505,6 +511,13 @@ function timeAgo(sec) {
   if (d < 86400) return Math.floor(d / 3600) + 'h ago';
   if (d < 2592000) return Math.floor(d / 86400) + 'd ago';
   return new Date(sec * 1000).toISOString().slice(0, 10);
+}
+
+// Wrap query terms in <mark> — split on the raw text, escape each part (entities stay intact).
+function highlight(raw, terms) {
+  if (!terms.length) return escapeHtml(raw);
+  const re = new RegExp('(' + terms.map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|') + ')', 'gi');
+  return String(raw).split(re).map((part, i) => i % 2 ? '<mark>' + escapeHtml(part) + '</mark>' : escapeHtml(part)).join('');
 }
 
 function updateStatus() {
@@ -555,6 +568,7 @@ function runSearch(query) {
     relay.eose = !relay.active; // inactive relays count as done
     relay.closed = false;
     relay.delivered = false;
+    relay.error = null;
     if (relay.ws && relay.ws.readyState === 1 && searchToken > 1) {
       try { relay.ws.send(JSON.stringify(['CLOSE', 'sip01-' + (searchToken - 1)])); } catch (e) {}
     }
@@ -571,6 +585,17 @@ function runSearch(query) {
 
 $go.addEventListener('click', () => runSearch($q.value.trim()));
 $q.addEventListener('keydown', (e) => { if (e.key === 'Enter') runSearch($q.value.trim()); });
+
+// Debounced live search — results update as you type (Enter and the button still work).
+let typeTimer = null;
+$q.addEventListener('input', () => {
+  clearTimeout(typeTimer);
+  typeTimer = setTimeout(() => {
+    const q = $q.value.trim();
+    if (q === currentQuery || q.length === 1) return; // no-op, or a single letter
+    runSearch(q);
+  }, 500);
+});
 
 // Keep "details" blocks open across re-renders (the toggle event doesn't bubble; capture does).
 $results.addEventListener('toggle', (e) => {
