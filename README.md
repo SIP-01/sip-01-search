@@ -2,7 +2,7 @@
 
 A static, serverless search client for the [SIP-01](https://github.com/SIP-01/SIP-01) Decentralized Search Index Protocol (Nostr kind `39697`).
 
-The page connects straight from the browser to Nostr relays, sends a NIP-50 `search` filter, groups results by document (`d` tag), and ranks by how many independent indexers published the same document.
+The page connects straight from the browser to Nostr relays, sends a NIP-50 `search` filter, groups results by document (`d` tag), and ranks by how many independent indexers published the same document. Each result shows freshness and expands to its indexer npubs (NIP-19 links via njump), the agreed content hash, and the document id.
 
 Every event is parsed and verified with the canonical protocol logic — a byte-compatible consumer port of [`sip-01-core`](https://github.com/SIP-01/sip-01-core) `src/protocol/webIndex.ts`:
 

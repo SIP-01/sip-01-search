@@ -73,6 +73,16 @@ main { max-width: 720px; margin: 0 auto; padding: 20px 16px 60px; }
   color: var(--muted);
 }
 .badge.agree { border-color: var(--accent-dim); color: var(--accent); }
+.det { margin-top: 6px; }
+.det summary { color: var(--muted); font-size: 11px; cursor: pointer; user-select: none; }
+.det-body { margin-top: 6px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); font-size: 12px; color: var(--muted); display: grid; gap: 4px; }
+.det-body a { color: var(--link); text-decoration: none; }
+.det-body a:hover { text-decoration: underline; }
+.det-body code { font-size: 11px; word-break: break-all; }
+.ops { max-width: 640px; margin: 8px auto 0; padding: 0 16px; }
+.ops summary { color: var(--muted); font-size: 12px; cursor: pointer; user-select: none; }
+.ops-body { margin-top: 6px; color: var(--muted); font-size: 12px; line-height: 1.9; text-align: left; }
+.ops-body code { background: var(--panel); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; font-size: 11px; }
 .empty { color: var(--muted); text-align: center; padding: 40px 0; }
 .json { white-space: pre-wrap; word-break: break-word; font-size: 12px; margin: 0; }
 footer { text-align: center; color: var(--muted); font-size: 11px; padding: 20px; }
@@ -85,10 +95,17 @@ a.foot { color: var(--muted); }
   <h1>SIP<span>-01</span> Search</h1>
   <div class="tag">One shared decentralized index · queries Nostr kind 39697 directly from your browser</div>
   <div class="searchbar">
-    <input id="q" type="text" placeholder="Search the index…" autocomplete="off">
+    <input id="q" type="text" placeholder="Search the index…" autocomplete="off" title="Press / to focus">
     <button id="go">Search</button>
   </div>
   <div class="hint">SIP-01 relays support operators — try <code>site:example.com</code> <code>title:nostr</code> <code>topic:privacy</code></div>
+  <details class="ops">
+    <summary>All search operators</summary>
+    <div class="ops-body">
+      <code>site:</code> <code>domain:</code> <code>url:</code> <code>inurl:</code> <code>title:</code> <code>topic:</code> <code>type:</code> <code>platform:</code> <code>category:</code> <code>network:</code> <code>country:</code> <code>mime:</code> <code>filetype:</code> <code>source:</code> <code>lang:</code> <code>before:</code> <code>after:</code> <code>distinct:domain</code><br>
+      Each has a negated <code>-op:</code> form (e.g. <code>-site:example.com</code>). Operators are sent only to SIP-01-aware relays; other relays see them as plain words.
+    </div>
+  </details>
 </header>
 <main>
   <div class="status" id="status"></div>
@@ -283,6 +300,7 @@ if (jsonMode) {
 
 let docs = new Map();       // d → { url, title, description, source, latest, indexers:Set, xAgree:Map }
 let seen = new Set();       // event ids, deduped across relays (per search)
+let openDetails = new Set(); // d values whose "details" block is open (survives re-renders)
 let stats = { observations: 0, dropped: 0 };
 let searchToken = 0;
 let currentQuery = '';
@@ -416,8 +434,12 @@ function render() {
     $results.innerHTML = '<div class="empty">No results yet — try a broader term, or give relays a moment.</div>';
   } else {
     $results.innerHTML = items.map(it => {
-      let xBest = 0;
-      for (const set of it.xAgree.values()) xBest = Math.max(xBest, set.size);
+      let xHash = '', xBest = 0;
+      for (const [hash, set] of it.xAgree) if (set.size > xBest) { xBest = set.size; xHash = hash; }
+      const indexers = [...it.indexers].map(pk => {
+        const npub = npubEncode(pk);
+        return `<a href="https://njump.to/${npub}" target="_blank" rel="noopener" title="${npub}">${npub.slice(0, 12)}…${npub.slice(-4)}</a>`;
+      }).join(' ');
       return `
     <div class="result">
       <div class="result-url">${escapeHtml(it.url)}</div>
@@ -427,7 +449,16 @@ function render() {
         <span class="badge agree" title="${escapeAttr([...it.indexers].map(npubEncode).join('\n'))}">${it.indexers.size} indexer${it.indexers.size === 1 ? '' : 's'} agree</span>
         ${xBest >= 2 ? `<span class="badge" title="${xBest} indexers reported the same content hash (x)">content ✓</span>` : ''}
         ${it.source ? `<span class="badge">${escapeHtml(it.source)}</span>` : ''}
+        <span class="badge" title="${escapeAttr(new Date(it.latest * 1000).toISOString())}">${timeAgo(it.latest)}</span>
       </div>
+      <details class="det" data-d="${escapeAttr(it.d)}"${openDetails.has(it.d) ? ' open' : ''}>
+        <summary>details</summary>
+        <div class="det-body">
+          <div>indexers: ${indexers}</div>
+          ${xHash ? `<div>x: <code>${escapeHtml(xHash)}</code> — ${xBest} agree</div>` : ''}
+          <div>d: <code>${escapeHtml(it.d)}</code></div>
+        </div>
+      </details>
     </div>`;
     }).join('');
   }
@@ -466,6 +497,15 @@ function renderJson() {
 
 function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function escapeAttr(s) { return escapeHtml(s); }
+
+function timeAgo(sec) {
+  const d = Math.max(0, Math.floor(Date.now() / 1000) - sec);
+  if (d < 60) return 'just now';
+  if (d < 3600) return Math.floor(d / 60) + 'm ago';
+  if (d < 86400) return Math.floor(d / 3600) + 'h ago';
+  if (d < 2592000) return Math.floor(d / 86400) + 'd ago';
+  return new Date(sec * 1000).toISOString().slice(0, 10);
+}
 
 function updateStatus() {
   if (jsonMode) return; // the JSON view refreshes via renderJson()
@@ -506,6 +546,7 @@ function runSearch(query) {
   const opQuery = OPERATOR_RE.test(query);
   docs = new Map();
   seen = new Set();
+  openDetails = new Set();
   stats = { observations: 0, dropped: 0 };
   render();
   for (const relay of pool) {
@@ -530,6 +571,22 @@ function runSearch(query) {
 
 $go.addEventListener('click', () => runSearch($q.value.trim()));
 $q.addEventListener('keydown', (e) => { if (e.key === 'Enter') runSearch($q.value.trim()); });
+
+// Keep "details" blocks open across re-renders (the toggle event doesn't bubble; capture does).
+$results.addEventListener('toggle', (e) => {
+  const el = e.target;
+  if (el && el.classList && el.classList.contains('det')) {
+    if (el.open) openDetails.add(el.dataset.d); else openDetails.delete(el.dataset.d);
+  }
+}, true);
+
+// Press / anywhere to jump to the search box.
+document.addEventListener('keydown', (e) => {
+  if (e.key === '/' && document.activeElement !== $q && !e.metaKey && !e.ctrlKey && !e.altKey) {
+    e.preventDefault();
+    $q.focus();
+  }
+});
 
 // Show the freshest items in the index on load (?q= pre-fills a search, ?format=json switches to the agent view).
 runSearch(initialQuery);
