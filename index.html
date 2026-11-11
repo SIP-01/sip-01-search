@@ -310,7 +310,11 @@ let currentQuery = '';
 let renderQueued = false;
 
 // Persistent relay pool — sockets are opened once and reused across searches.
-const pool = RELAYS.map(r => ({ url: r.url, sip01: r.sip01, ws: null, retry: 0, timer: null, eose: false, closed: false, active: false, delivered: false }));
+const pool = RELAYS.map(r => ({
+  url: r.url, sip01: r.sip01, ws: null, retry: 0, timer: null,
+  eose: false, closed: false, active: false, delivered: false,
+  completeness: 'idle', eoseHints: [], pages: 0, pageEvents: [], sub: null, error: null,
+}));
 
 // NIP-11 discovery — the spec says clients SHOULD check `supported_nips` (50) and the
 // `uncaged_index` block before relying on SIP-01 operator semantics (§15). The RELAYS
@@ -364,20 +368,84 @@ function scheduleReconnect(relay) {
   relay.timer = setTimeout(() => connect(relay), delay);
 }
 
-function sendReq(relay) {
-  if (!relay.ws || relay.ws.readyState !== 1) return;
-  const filter = currentQuery
+function baseFilter() {
+  return currentQuery
     ? { kinds: [WEB_INDEX_KIND], search: currentQuery, limit: SEARCH_LIMIT }
     : { kinds: [WEB_INDEX_KIND], limit: SEARCH_LIMIT };
-  relay.ws.send(JSON.stringify(['REQ', subId(), filter]));
+}
+
+function sendReq(relay, overrideFilter = null) {
+  if (!relay.ws || relay.ws.readyState !== 1) return;
+  if (relay.sub) {
+    try { relay.ws.send(JSON.stringify(['CLOSE', relay.sub])); } catch (e) {}
+  }
+  relay.pages += 1;
+  relay.sub = subId() + '-r' + relay.pages;
+  relay.pageEvents = [];
+  relay.eose = false;
+  relay.closed = false;
+  relay.completeness = 'pending';
+  relay.error = null;
+  relay.ws.send(JSON.stringify(['REQ', relay.sub, overrideFilter || baseFilter()]));
+}
+
+function endRelay(relay, state, error = null) {
+  relay.eose = true;
+  relay.closed = state !== 'complete' && state !== 'unknown';
+  relay.completeness = state;
+  relay.error = error ? String(error).slice(0, 200) : null;
+  updateStatus();
+  scheduleRender();
 }
 
 function handleMessage(relay, msg) {
   let data;
   try { data = JSON.parse(msg.data); } catch (e) { return; }
-  if (!Array.isArray(data) || data[1] !== subId()) return; // stale sub from an earlier search
-  if (data[0] === 'EVENT') { relay.delivered = true; onEvent(data[2]); }
-  else if (data[0] === 'EOSE' || data[0] === 'CLOSED') { if (data[0] === 'CLOSED' && data[2]) relay.error = String(data[2]).slice(0, 160); relay.eose = true; updateStatus(); scheduleRender(); }
+  if (!Array.isArray(data) || data[1] !== relay.sub) return; // stale subscription
+  if (data[0] === 'EVENT' && data[2]) {
+    relay.delivered = true;
+    relay.pageEvents.push(data[2]);
+    onEvent(data[2]);
+    return;
+  }
+  if (data[0] === 'CLOSED') {
+    endRelay(relay, 'closed', data[2] || 'subscription closed before completion');
+    return;
+  }
+  if (data[0] !== 'EOSE') return;
+
+  relay.eoseHints = Array.isArray(data[2]) ? data[2].map(String) : [];
+  if (relay.eoseHints.includes('auth')) {
+    endRelay(relay, 'auth-required', 'relay indicates additional results may require NIP-42 AUTH');
+    return;
+  }
+  if (relay.eoseHints.includes('more')) {
+    if (relay.pages >= 10) {
+      endRelay(relay, 'pagination-limit', 'pagination stopped at the 10-page safety limit');
+      return;
+    }
+    const timestamps = relay.pageEvents.map(ev => Number(ev?.created_at)).filter(Number.isFinite);
+    if (!timestamps.length) {
+      endRelay(relay, 'partial', 'relay sent NIP-67 more but no timestamp cursor was available');
+      return;
+    }
+    const oldest = Math.min(...timestamps);
+    const nextFilter = { ...baseFilter(), until: oldest };
+    // A tie at the pagination boundary may be repeated. The global event-id set
+    // deduplicates it; a relay returning no new events is stopped on the next page.
+    const beforeCount = relay.pageEvents.length;
+    if (beforeCount === 0) {
+      endRelay(relay, 'partial', 'pagination made no progress');
+      return;
+    }
+    sendReq(relay, nextFilter);
+    return;
+  }
+  if (relay.eoseHints.includes('finish')) {
+    endRelay(relay, 'complete');
+    return;
+  }
+  endRelay(relay, 'unknown', 'EOSE received without a definitive NIP-67 finish hint');
 }
 
 function onEvent(ev) {
@@ -475,7 +543,11 @@ function render() {
 function renderJson() {
   if (!$json) return;
   const active = pool.filter(r => r.active);
-  const pending = active.filter(r => !(r.eose || r.closed)).length;
+  const pending = active.filter(r => r.completeness === 'pending').length;
+  const allComplete = active.length > 0 && active.every(r => r.completeness === 'complete');
+  const hasPartial = active.some(r => ['partial', 'pagination-limit', 'auth-required', 'timeout', 'closed'].includes(r.completeness));
+  const hasUnknown = active.some(r => r.completeness === 'unknown');
+  const completeness = pending > 0 ? 'pending' : allComplete ? 'complete' : hasPartial ? 'partial' : hasUnknown ? 'unknown' : 'unknown';
   const results = [...docs.values()]
     .sort((a, b) => b.indexers.size - a.indexers.size || b.latest - a.latest)
     .map(it => {
@@ -490,9 +562,16 @@ function renderJson() {
   $json.textContent = JSON.stringify({
     version: 1,
     query: currentQuery,
-    complete: pending === 0,
+    complete: allComplete,
+    partial: hasPartial,
+    completeness,
+    completenessScope: 'only the relays listed below; this does not prove global index completeness',
     pending,
-    relays: active.map(r => ({ url: r.url, name: r.name, sip01: r.sip01, delivered: r.delivered, error: r.error })),
+    relays: active.map(r => ({
+      url: r.url, name: r.name, sip01: r.sip01, delivered: r.delivered,
+      eose: r.eose, eoseHints: r.eoseHints, completeness: r.completeness,
+      pages: r.pages, error: r.error,
+    })),
     generatedAt: Math.floor(Date.now() / 1000),
     documents: docs.size,
     observations: stats.observations,
@@ -565,17 +644,31 @@ function runSearch(query) {
   for (const relay of pool) {
     clearTimeout(relay.deadline);
     relay.active = (!opQuery || relay.sip01) && relay.nip50 !== false;
-    relay.eose = !relay.active; // inactive relays count as done
+    relay.eose = !relay.active; // inactive relays are excluded from completeness aggregation
     relay.closed = false;
     relay.delivered = false;
     relay.error = null;
+    relay.completeness = relay.active ? 'pending' : 'inactive';
+    relay.eoseHints = [];
+    relay.pages = 0;
+    relay.pageEvents = [];
+    relay.sub = null;
     if (relay.ws && relay.ws.readyState === 1 && searchToken > 1) {
       try { relay.ws.send(JSON.stringify(['CLOSE', 'sip01-' + (searchToken - 1)])); } catch (e) {}
     }
     if (!relay.active) continue;
-    // NIP-01 says relays SHOULD send EOSE; a hung one must not stall `complete` forever.
+    // A timeout settles the request as incomplete; it never means "complete".
     relay.deadline = setTimeout(() => {
-      if (!relay.eose && !relay.closed) { relay.closed = true; updateStatus(); scheduleRender(); }
+      if (!relay.eose && !relay.closed) {
+        relay.closed = true;
+        relay.completeness = 'timeout';
+        relay.error = 'timeout waiting for EOSE';
+        if (relay.sub && relay.ws && relay.ws.readyState === 1) {
+          try { relay.ws.send(JSON.stringify(['CLOSE', relay.sub])); } catch (e) {}
+        }
+        updateStatus();
+        scheduleRender();
+      }
     }, 20000);
     if (relay.ws && relay.ws.readyState === 1) sendReq(relay);
     else connect(relay);
