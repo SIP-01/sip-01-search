@@ -37,6 +37,7 @@ npx serve .
 The CLI/MCP tool requires Node 22 or newer and the pinned verifier package:
 
 ~~~bash
+npm install --prefix agent --no-package-lock --ignore-scripts
 node agent/sip01-search.mjs "privacy tools" --limit 40
 node agent/sip01-search.mjs --mcp
 ~~~
