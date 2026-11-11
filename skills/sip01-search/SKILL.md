@@ -17,14 +17,14 @@ SIP-01 is a draft, optional protocol profile. Its canonical specification is htt
 
 ### 1. CLI or MCP tool (preferred for agents)
 
-From the SIP-01 Search repository, using Node 22 or newer:
+From the SIP-01 Search repository, using Node 22 or newer and installing the pinned signature verifier:
 
 ~~~bash
 node agent/sip01-search.mjs "privacy tools" --limit 40
 node agent/sip01-search.mjs --mcp
 ~~~
 
-The CLI returns JSON. The MCP stdio server exposes a tool named search. Results are verified, deduplicated and ranked by the number of distinct indexer pubkeys.
+The CLI returns JSON. The MCP stdio server exposes a tool named search. Before trusting an observation, the CLI calls `nostr-tools/pure.verifyEvent` from the pinned `nostr-tools@2.26.0` package to validate the NIP-01 event id and BIP-340 signature, then validates the SIP-01 d/x values. Results are deduplicated and ranked by distinct indexer pubkeys.
 
 ### 2. Machine-readable web page
 
@@ -32,7 +32,7 @@ A browser-capable agent can open:
 
 https://sip-01-search.vercel.app/?q=<query>&format=json
 
-The page runs client-side JavaScript. A plain HTTP fetch that does not execute JavaScript may not return the JSON result. Use the CLI/MCP tool or direct relay query in that case.
+The page runs client-side JavaScript. A plain HTTP fetch that does not execute JavaScript may not return the JSON result. It loads the pinned `nostr-tools@2.26.0` verifier from esm.sh on demand; if the verifier cannot load, it withholds results and reports verification unavailable. Use the CLI/MCP tool or direct relay query in that case, and verify NIP-01 signatures with a maintained library before trusting direct relay responses.
 
 ### 3. Direct Nostr relay query
 
