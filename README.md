@@ -2,12 +2,12 @@
 
 A static, serverless search client for the [SIP-01](https://github.com/SIP-01/SIP-01) draft decentralized web index on Nostr (kind 39697).
 
-The browser app queries Nostr relays, groups verified observations by document identity (`d`) and ranks documents by distinct indexer pubkeys. It verifies each event's normalized URL identity (`d`) and content hash (`x`) using protocol logic shared with [sip-01-core](https://github.com/SIP-01/sip-01-core).
+The browser app queries Nostr relays, verifies NIP-01 event ids and BIP-340 signatures with the pinned `nostr-tools@2.26.0` pure-JS verifier, then checks SIP-01 document identity (`d`) and content hash (`x`). It groups accepted observations by document and ranks by distinct indexer pubkeys. The browser loads the pinned verifier from esm.sh only when an event needs validation; if that library cannot load, it withholds results and reports verification unavailable.
 
 ## Verification and result completeness
 
 Each queried relay reports its own EOSE and completeness state. The CLI/MCP tool:
-- verifies and deduplicates received observations;
+- verifies NIP-01 event ids and BIP-340 signatures using `nostr-tools/pure` before SIP-01 parsing;\n- verifies and deduplicates received observations;
 - interprets NIP-67 `finish`, `more` and `auth` hints;
 - paginates explicit `more` hints using an `until` cursor, with a 10-page safety limit;
 - reports timeout, CLOSED, connection errors, AUTH requirements, unknown completeness and safety-limit stops as incomplete.
@@ -34,7 +34,7 @@ No build step is needed for the static web client:
 npx serve .
 ~~~
 
-The CLI/MCP tool requires Node 22 or newer:
+The CLI/MCP tool requires Node 22 or newer and the pinned verifier package:
 
 ~~~bash
 node agent/sip01-search.mjs "privacy tools" --limit 40
