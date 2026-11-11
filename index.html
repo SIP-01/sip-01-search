@@ -576,6 +576,8 @@ function renderJson() {
     completeness,
     completenessScope: 'only the relays listed below; this does not prove global index completeness',
     pending,
+    pendingRelays,
+    pendingVerifications,
     relays: active.map(r => ({
       url: r.url, name: r.name, sip01: r.sip01, delivered: r.delivered,
       eose: r.eose, eoseHints: r.eoseHints, completeness: r.completeness,
