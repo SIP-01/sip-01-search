@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 /**
- * SIP-01 Search — agent tool. Zero dependencies, Node 22+ (global WebSocket).
+ * SIP-01 Search — agent tool. Node 22+ (global WebSocket) plus pinned nostr-tools@2.26.0 for NIP-01 signature verification.
  *
  *   node agent/sip01-search.mjs "query" [--limit N]   one search, JSON on stdout
  *   node agent/sip01-search.mjs --mcp                 MCP stdio server (tool: search)
  *
- * One source of truth: the protocol logic (normalization, hashing, parse, verify)
+ * One source of truth: SIP-01 protocol logic (normalization, hashing, parse, d/x verification)
  * and the relay list are extracted from ../index.html — the same code the web
- * client runs. Results are verified, deduplicated, and ranked by distinct indexers.
+ * client runs. NIP-01 event ids/signatures are verified with nostr-tools before SIP-01 d/x checks; results are deduplicated and ranked by distinct indexers.
  */
 import { readFileSync } from 'node:fs';
 import { verifyEvent } from 'nostr-tools/pure';
