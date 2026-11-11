@@ -1,54 +1,72 @@
 # SIP-01 Search
 
-A static, serverless search client for the [SIP-01](https://github.com/SIP-01/SIP-01) Decentralized Search Index Protocol (Nostr kind `39697`).
+A static, serverless search client for the [SIP-01](https://github.com/SIP-01/SIP-01) draft decentralized web index on Nostr (kind 39697).
 
-The page connects straight from the browser to Nostr relays, sends a NIP-50 `search` filter, groups results by document (`d` tag), and ranks by how many independent indexers published the same document. Each result shows freshness and expands to its indexer npubs (NIP-19 links via njump), the agreed content hash, and the document id.
+The browser app queries Nostr relays, groups verified observations by document identity (`d`) and ranks documents by distinct indexer pubkeys. It verifies each event's normalized URL identity (`d`) and content hash (`x`) using protocol logic shared with [sip-01-core](https://github.com/SIP-01/sip-01-core).
 
-Every event is parsed and verified with the canonical protocol logic — a byte-compatible consumer port of [`sip-01-core`](https://github.com/SIP-01/sip-01-core) `src/protocol/webIndex.ts`:
+## Verification and result completeness
 
-- `d` is recomputed from the normalized `u` URL and must match — spoofed observations are dropped (spec §18 step 2)
-- `x` (content hash) is verified against the published title/description when present; ≥2 indexers reporting the same hash show a `content ✓` badge
-- `v` must be `"1"`; URLs are normalized per spec §7 (tracking params stripped, host lowercased, …) before hashing
+Each queried relay reports its own EOSE and completeness state. The CLI/MCP tool:
+- verifies and deduplicates received observations;
+- interprets NIP-67 `finish`, `more` and `auth` hints;
+- paginates explicit `more` hints using an `until` cursor, with a 10-page safety limit;
+- reports timeout, CLOSED, connection errors, AUTH requirements, unknown completeness and safety-limit stops as incomplete.
 
-The spec §13 test vectors are pinned by `node test/vectors.mjs` (no dependencies).
+The top-level `complete` field is true only when every selected relay reports NIP-67 `finish`. A plain EOSE means completeness is unknown. `pending: 0` means the selected requests have settled; it does not mean the result set is exhaustive. Completeness applies only to the listed relays, not the global decentralized index.
 
-Performance: relay connections are persistent and reused across searches, events are deduplicated by id across relays, and rendering is batched to one frame. Results update as you type (debounced), and searches are shareable — the query lives in the URL (`?q=…`).
+The direct web page has its own client-side result lifecycle. Do not assume its `complete` field has the same guarantees as the CLI/MCP tool unless it explicitly reports the new per-relay completeness metadata.
 
-Relay capabilities are discovered from each relay's NIP-11 document (`supported_nips`, `uncaged_index`) — operator queries only go to relays that advertise SIP-01 support, and the status line reports how many relays actually served events.
+## Protocol checks
 
-- Live: https://sip-01-search.vercel.app
-- Protocol: https://github.com/SIP-01/SIP-01
-- Core library: https://github.com/SIP-01/sip-01-core
+- `d` is recomputed from the normalized `u` URL.
+- `x`, when present, is checked against the published title and description.
+- `v` must be `"1"`.
+- Multiple relay copies of the same event are deduplicated by event id.
+- Distinct author pubkeys are counted per `d`; this is an agreement signal, not proof of truth or Sybil resistance.
+
+SIP-01 is a draft, optional protocol profile, not an accepted NIP. The canonical specification and current status are at https://github.com/SIP-01/SIP-01.
 
 ## Run locally
 
-No build step. Serve the folder with any static server:
+No build step is needed for the static web client:
 
-```
+~~~bash
 npx serve .
-```
+~~~
 
-## Test
+The CLI/MCP tool requires Node 22 or newer:
 
-```
+~~~bash
+node agent/sip01-search.mjs "privacy tools" --limit 40
+node agent/sip01-search.mjs --mcp
+~~~
+
+## Tests
+
+~~~bash
 node test/vectors.mjs
-```
+node --check agent/sip01-search.mjs
+~~~
 
-## Agent use
+## Agent skill
 
-- Machine-readable results: append `&format=json` to any search URL — the page runs the search and emits `{ version, query, complete, pending, relays, generatedAt, documents, observations, dropped, results[] }` (each result carries `indexerPubkeys` for independence checks). `&limit=N` (1–200, default 40) caps observations per relay. Needs a JavaScript-capable reader; re-read while `complete` is false.
-- [`agent/sip01-search.mjs`](agent/sip01-search.mjs) — zero-dependency CLI and MCP server (Node 22+): `node agent/sip01-search.mjs "query"` for JSON on stdout, or `--mcp` to serve the `search` tool to MCP clients. Reads the relay list and protocol logic from `index.html`, so there is one source of truth.
-- [`agent/SKILL.md`](agent/SKILL.md) — drop-in instructions for AI agents (JSON view, direct relay `REQ`, CLI/MCP, verification rules).
-- [`llms.txt`](llms.txt) — site description for LLM/agent crawlers.
-- For tools, models, and other agents (kind `39698`), use [ORBSTR](https://github.com/SIP-01/Orbstr) — this client covers web documents (kind `39697`) only.
+The portable Agent Skill package is [skills/sip01-search/SKILL.md](skills/sip01-search/SKILL.md). Install it into a directory named `sip01-search` so the directory matches the frontmatter name:
+
+~~~bash
+git clone https://github.com/SIP-01/sip-01-search <skills-root>/sip01-search
+~~~
+
+The skill explains JSON, direct relay REQ, CLI/MCP, verification and honest completeness reporting.
+
+For tools, models and other agents, use [ORBSTR](https://github.com/SIP-01/Orbstr) (companion capability profile, kind 39698). This repository searches web documents (kind 39697).
 
 ## Configure relays
 
-Edit the `RELAYS` array near the bottom of `index.html`. Mark SIP-01-aware relays with `sip01: true` — operator queries (`site:`, `title:`, `topic:`, …) are only sent to those, because generic NIP-50 relays treat operators as plain search terms.
+Edit the `RELAYS` array near the bottom of `index.html`. Mark SIP-01-aware relays with `sip01: true`. Operator queries are relay-specific; only send SIP-01 operators to relays that advertise support through NIP-11 metadata.
 
 ## Deploy
 
-Import the repo in Vercel as a static project (framework: Other, no build command).
+Import this repository in Vercel as a static project (framework: Other, no build command).
 
 ## License
 
