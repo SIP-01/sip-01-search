@@ -52,7 +52,9 @@ The tool reports completeness per queried relay:
 - complete: that relay returned a NIP-67 finish hint for its stored results.
 - more-available: the relay returned a NIP-67 more hint; the CLI paginates using until, with a 10-page safety limit.
 - partial: a relay failed, closed, timed out, made no pagination progress or reached the page limit.
-- unknown: the relay sent EOSE without a definitive NIP-67 finish hint, or no compatible relay could be queried.
+- unknown: a legacy or non-conclusive relay response could not be safely paginated to a definitive end, or no compatible relay could be queried.
+
+When finish and more are both absent—including a legacy two-element EOSE or only unknown hint values—the client follows NIP-67's bounded legacy fallback: it paginates with until set to the oldest received created_at. It never calls that fallback complete; only an explicit finish hint does. Pagination stops as incomplete when the cursor stalls, no new events arrive, or the 10-page safety limit is reached.
 
 The top-level complete field is true only when every relay selected for the query reports complete. The top-level partial field identifies known incomplete responses. pending=0 means no selected relay request is still running; it does NOT mean the result set is exhaustive.
 
