@@ -353,7 +353,9 @@ function connect(relay) {
     if (relay.ws !== ws) return;
     relay.ws = null;
     if (!relay.eose) {
-      relay.closed = true; // count it as done for this search; retry in the background
+      relay.closed = true; // settled as incomplete for this search; reconnect may retry it
+      relay.completeness = 'closed';
+      relay.error = 'websocket closed before EOSE';
       scheduleReconnect(relay);
       updateStatus();
       scheduleRender();
@@ -539,7 +541,7 @@ function render() {
   updateStatus();
 }
 
-// JSON view for agents — same verified data, machine-readable (schema in agent/SKILL.md).
+// JSON view for agents — same verified data, machine-readable (schema in skills/sip01-search/SKILL.md).
 function renderJson() {
   if (!$json) return;
   const active = pool.filter(r => r.active);
@@ -663,8 +665,10 @@ function runSearch(query) {
         relay.closed = true;
         relay.completeness = 'timeout';
         relay.error = 'timeout waiting for EOSE';
-        if (relay.sub && relay.ws && relay.ws.readyState === 1) {
-          try { relay.ws.send(JSON.stringify(['CLOSE', relay.sub])); } catch (e) {}
+        const expiredSub = relay.sub;
+        relay.sub = null; // ignore any late responses for the expired request
+        if (expiredSub && relay.ws && relay.ws.readyState === 1) {
+          try { relay.ws.send(JSON.stringify(['CLOSE', expiredSub])); } catch (e) {}
         }
         updateStatus();
         scheduleRender();
