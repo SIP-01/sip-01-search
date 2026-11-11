@@ -1,0 +1,9 @@
+{
+  "name": "sip01-search-agent",
+  "private": true,
+  "type": "module",
+  "description": "SIP-01 Search CLI and MCP agent tool",
+  "dependencies": {
+    "nostr-tools": "2.26.0"
+  }
+}
