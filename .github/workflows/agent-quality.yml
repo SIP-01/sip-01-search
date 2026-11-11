@@ -1,0 +1,33 @@
+name: SIP-01 Search agent quality
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sip01-search-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
+        with:
+          node-version: "22"
+      - name: Check agent CLI syntax
+        run: node --check agent/sip01-search.mjs
+      - name: Run canonical SIP-01 protocol vectors
+        run: node test/vectors.mjs
+      - name: Validate portable Agent Skill format
+        run: |
+          python -m pip install "git+https://github.com/agentskills/agentskills.git@83021e2be457a9b6679148719c1f6074f0ad975e#subdirectory=skills-ref"
+          skills-ref validate skills/sip01-search
