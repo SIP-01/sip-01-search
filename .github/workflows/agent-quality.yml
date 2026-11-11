@@ -23,8 +23,12 @@ jobs:
       - uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
         with:
           node-version: "22"
+      - name: Install pinned Nostr verification dependency
+        run: npm install --prefix agent --no-package-lock --ignore-scripts
       - name: Check agent CLI syntax
         run: node --check agent/sip01-search.mjs
+      - name: Verify NIP-01 event signatures
+        run: node --test agent/test/signature.mjs
       - name: Run canonical SIP-01 protocol vectors
         run: node test/vectors.mjs
       - name: Validate portable Agent Skill format
