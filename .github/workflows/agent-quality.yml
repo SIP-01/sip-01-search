@@ -27,8 +27,8 @@ jobs:
         run: npm install --prefix agent --no-package-lock --ignore-scripts
       - name: Check agent CLI syntax
         run: node --check agent/sip01-search.mjs
-      - name: Verify NIP-01 event signatures
-        run: node --test agent/test/signature.mjs
+      - name: Test NIP-01 signatures and NIP-67 pagination semantics
+        run: node --test agent/test/*.mjs
       - name: Run canonical SIP-01 protocol vectors
         run: node test/vectors.mjs
       - name: Validate portable Agent Skill format
