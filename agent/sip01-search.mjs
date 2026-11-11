@@ -11,6 +11,7 @@
  */
 import { readFileSync } from 'node:fs';
 import { verifyEvent } from 'nostr-tools/pure';
+import { classifyEoseHints, nextPaginationCursor } from './completeness.mjs';
 
 if (typeof WebSocket === 'undefined') {
   console.error('sip01-search: Node 22+ required (global WebSocket).');
@@ -78,10 +79,11 @@ async function queryRelayPage(url, filter, page) {
       } else if (d[0] === 'EOSE' && d[1] === subId) {
         result.eose = true;
         result.hints = Array.isArray(d[2]) ? d[2].map(String) : [];
-        if (result.hints.includes('auth')) finish('auth-required', 'relay indicates more data may require AUTH');
-        else if (result.hints.includes('more')) finish('more-available');
-        else if (result.hints.includes('finish')) finish('complete');
-        else finish('unknown', 'EOSE received without a definitive NIP-67 finish hint');
+        const state = classifyEoseHints(result.hints);
+        if (state === 'auth-required') finish('auth-required', 'relay indicates more data may require AUTH');
+        else if (state === 'more-available') finish('more-available');
+        else if (state === 'complete') finish('complete');
+        else finish('legacy', 'no definitive NIP-67 hint; use bounded legacy pagination');
       } else if (d[0] === 'CLOSED' && d[1] === subId) {
         finish('closed', d[2] || 'subscription closed before completion');
       } else if (d[0] === 'NOTICE' && d[1]) {
@@ -125,23 +127,18 @@ async function queryRelay(relay, filter) {
       error = null;
       break;
     }
-    if (response.completeness === 'more-available') {
-      const timestamps = response.events
-        .map(event => Number(event?.created_at))
-        .filter(Number.isFinite);
-      if (!timestamps.length || fresh.length === 0) {
-        completion = 'partial';
-        error = 'NIP-67 more hint received but pagination made no progress';
+    if (response.completeness === 'more-available' || response.completeness === 'legacy') {
+      const cursor = nextPaginationCursor(response.events, fresh, pageFilter.until);
+      if (!cursor.ok) {
+        const legacy = response.completeness === 'legacy';
+        completion = legacy ? 'unknown' : 'partial';
+        error = legacy
+          ? 'legacy EOSE pagination stopped without a safe next cursor; completeness remains unknown'
+          : 'NIP-67 more hint received but pagination could not make safe progress';
         break;
       }
-      const oldest = Math.min(...timestamps);
-      if (pageFilter.until !== undefined && oldest > pageFilter.until) {
-        completion = 'partial';
-        error = 'pagination cursor did not move backward';
-        break;
-      }
-      pageFilter = { ...filter, until: oldest };
-      completion = 'more-available';
+      pageFilter = { ...filter, until: cursor.until };
+      completion = response.completeness === 'legacy' ? 'legacy-pagination' : 'more-available';
       continue;
     }
 
@@ -150,9 +147,9 @@ async function queryRelay(relay, filter) {
     break;
   }
 
-  if (completion === 'more-available' && pages >= maxPages) {
+  if (['more-available', 'legacy-pagination'].includes(completion) && pages >= maxPages) {
     completion = 'partial';
-    error = 'pagination stopped at the 10-page safety limit; more stored events may remain';
+    error = 'pagination stopped at the 10-page safety limit; additional stored events may remain';
   }
   relay.events = events;
   relay.eose = eose;
