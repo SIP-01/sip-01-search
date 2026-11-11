@@ -10,6 +10,7 @@
  * client runs. Results are verified, deduplicated, and ranked by distinct indexers.
  */
 import { readFileSync } from 'node:fs';
+import { verifyEvent } from 'nostr-tools/pure';
 
 if (typeof WebSocket === 'undefined') {
   console.error('sip01-search: Node 22+ required (global WebSocket).');
@@ -177,12 +178,15 @@ export async function search(query, limit = DEFAULT_LIMIT) {
     for (const ev of r.events) {
       if (!ev || !ev.id || seen.has(ev.id)) continue;
       seen.add(ev.id);
+      let signatureOk = false;
+      try { signatureOk = verifyEvent(ev); } catch {}
+      if (!signatureOk) { dropped++; continue; }
       let obs = null;
       try { obs = P.parseIndexEvent(ev); } catch {}
       if (!obs) { dropped++; continue; }
-      let ok = false;
-      try { ok = await P.verifyObservation(obs); } catch {}
-      if (!ok) { dropped++; continue; }
+      let observationOk = false;
+      try { observationOk = await P.verifyObservation(obs); } catch {}
+      if (!observationOk) { dropped++; continue; }
       observations++;
       let entry = docs.get(obs.d);
       if (!entry) { entry = { d: obs.d, url: obs.url, title: obs.title, description: obs.description, source: obs.source, latest: 0, indexers: new Set(), xAgree: new Map() }; docs.set(obs.d, entry); }
@@ -238,6 +242,7 @@ export async function search(query, limit = DEFAULT_LIMIT) {
     partial,
     completeness: complete ? 'complete' : partial ? 'partial' : 'unknown',
     completenessScope: 'only the relays listed below; this does not prove global index completeness',
+    cryptographicSignatureVerification: 'nostr-tools@2.26.0 verifyEvent (NIP-01 id + BIP-340 signature)',
     pending: 0,
     queriedRelays: active.length,
     operatorsRestrictedToSIP01AwareRelays: opQuery,
