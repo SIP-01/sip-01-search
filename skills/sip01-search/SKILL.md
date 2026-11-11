@@ -20,6 +20,7 @@ SIP-01 is a draft, optional protocol profile. Its canonical specification is htt
 From the SIP-01 Search repository, using Node 22 or newer and installing the pinned signature verifier:
 
 ~~~bash
+npm install --prefix agent --no-package-lock --ignore-scripts
 node agent/sip01-search.mjs "privacy tools" --limit 40
 node agent/sip01-search.mjs --mcp
 ~~~
