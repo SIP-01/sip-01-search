@@ -1,15 +1,17 @@
 #!/usr/bin/env node
 /**
- * SIP-01 Search — agent tool. Zero dependencies, Node 22+ (global WebSocket).
+ * SIP-01 Search — agent tool. Node 22+ (global WebSocket) plus pinned nostr-tools@2.26.0 for NIP-01 signature verification.
  *
  *   node agent/sip01-search.mjs "query" [--limit N]   one search, JSON on stdout
  *   node agent/sip01-search.mjs --mcp                 MCP stdio server (tool: search)
  *
- * One source of truth: the protocol logic (normalization, hashing, parse, verify)
+ * One source of truth: SIP-01 protocol logic (normalization, hashing, parse, d/x verification)
  * and the relay list are extracted from ../index.html — the same code the web
- * client runs. Results are verified, deduplicated, and ranked by distinct indexers.
+ * client runs. NIP-01 event ids/signatures are verified with nostr-tools before SIP-01 d/x checks; results are deduplicated and ranked by distinct indexers.
  */
 import { readFileSync } from 'node:fs';
+import { verifyEvent } from 'nostr-tools/pure';
+import { classifyEoseHints, nextPaginationCursor } from './completeness.mjs';
 
 if (typeof WebSocket === 'undefined') {
   console.error('sip01-search: Node 22+ required (global WebSocket).');
@@ -46,24 +48,117 @@ async function relayInfo(relay) {
   return { url: relay.url, sip01, name, delivered: false, error: null, events: [] };
 }
 
-function queryRelay(relay, filter) {
+async function queryRelayPage(url, filter, page) {
+  const subId = 'sip01-agent-' + String(page);
   return new Promise(resolve => {
     let ws;
-    try { ws = new WebSocket(relay.url); } catch (e) { relay.error = 'connect failed'; return resolve(); }
-    const timer = setTimeout(() => { relay.error = relay.error || 'timeout waiting for EOSE'; try { ws.close(); } catch {} resolve(); }, RELAY_TIMEOUT_MS);
-    const done = () => { clearTimeout(timer); try { ws.close(); } catch {} resolve(); };
-    ws.onopen = () => ws.send(JSON.stringify(['REQ', 'sip01-agent', filter]));
-    ws.onmessage = (m) => {
-      let d; try { d = JSON.parse(m.data); } catch { return; }
-      if (d[0] === 'EVENT') { relay.delivered = true; relay.events.push(d[2]); }
-      else if (d[0] === 'EOSE') done();
-      else if (d[0] === 'CLOSED') { if (d[2]) relay.error = String(d[2]).slice(0, 160); done(); }
-      else if (d[0] === 'NOTICE' && d[1]) relay.error = String(d[1]).slice(0, 160);
+    let settled = false;
+    const result = { events: [], eose: false, hints: [], completeness: 'pending', error: null };
+    const finish = (completeness, error = null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      result.completeness = completeness;
+      result.error = error ? String(error).slice(0, 200) : null;
+      try { ws?.close(); } catch {}
+      resolve(result);
     };
-    ws.onerror = () => { relay.error = relay.error || 'connection error'; done(); };
+    const timer = setTimeout(() => finish('timeout', 'timeout waiting for EOSE'), RELAY_TIMEOUT_MS);
+    try { ws = new WebSocket(url); }
+    catch { finish('error', 'connection could not be created'); return; }
+    ws.onopen = () => {
+      try { ws.send(JSON.stringify(['REQ', subId, filter])); }
+      catch (error) { finish('error', error?.message || 'request send failed'); }
+    };
+    ws.onmessage = (m) => {
+      let d;
+      try { d = JSON.parse(m.data); } catch { return; }
+      if (!Array.isArray(d) || !d.length) return;
+      if (d[0] === 'EVENT' && d[1] === subId && d[2]) {
+        result.events.push(d[2]);
+      } else if (d[0] === 'EOSE' && d[1] === subId) {
+        result.eose = true;
+        result.hints = Array.isArray(d[2]) ? d[2].map(String) : [];
+        const state = classifyEoseHints(result.hints);
+        if (state === 'auth-required') finish('auth-required', 'relay indicates more data may require AUTH');
+        else if (state === 'more-available') finish('more-available');
+        else if (state === 'complete') finish('complete');
+        else finish('legacy', 'no definitive NIP-67 hint; use bounded legacy pagination');
+      } else if (d[0] === 'CLOSED' && d[1] === subId) {
+        finish('closed', d[2] || 'subscription closed before completion');
+      } else if (d[0] === 'NOTICE' && d[1]) {
+        result.error = String(d[1]).slice(0, 200);
+      }
+    };
+    ws.onerror = () => finish('error', 'websocket error');
+    ws.onclose = () => {
+      if (!settled) finish('closed', 'websocket closed before EOSE');
+    };
   });
 }
 
+async function queryRelay(relay, filter) {
+  const events = [];
+  const seen = new Set();
+  let pageFilter = { ...filter };
+  let completion = 'unknown';
+  let error = null;
+  let eose = false;
+  let eoseHints = [];
+  let pages = 0;
+  const maxPages = 10;
+
+  for (let page = 0; page < maxPages; page++) {
+    const response = await queryRelayPage(relay.url, pageFilter, page);
+    pages += 1;
+    eose = response.eose;
+    eoseHints = response.hints;
+    const fresh = [];
+    for (const event of response.events) {
+      if (event?.id && !seen.has(event.id)) {
+        seen.add(event.id);
+        fresh.push(event);
+        events.push(event);
+      }
+    }
+
+    if (response.completeness === 'complete') {
+      completion = 'complete';
+      error = null;
+      break;
+    }
+    if (response.completeness === 'more-available' || response.completeness === 'legacy') {
+      const cursor = nextPaginationCursor(response.events, fresh, pageFilter.until);
+      if (!cursor.ok) {
+        const legacy = response.completeness === 'legacy';
+        completion = legacy ? 'unknown' : 'partial';
+        error = legacy
+          ? 'legacy EOSE pagination stopped without a safe next cursor; completeness remains unknown'
+          : 'NIP-67 more hint received but pagination could not make safe progress';
+        break;
+      }
+      pageFilter = { ...filter, until: cursor.until };
+      completion = response.completeness === 'legacy' ? 'legacy-pagination' : 'more-available';
+      continue;
+    }
+
+    completion = response.completeness;
+    error = response.error;
+    break;
+  }
+
+  if (['more-available', 'legacy-pagination'].includes(completion) && pages >= maxPages) {
+    completion = 'partial';
+    error = 'pagination stopped at the 10-page safety limit; additional stored events may remain';
+  }
+  relay.events = events;
+  relay.eose = eose;
+  relay.eoseHints = eoseHints;
+  relay.completeness = completion;
+  relay.pages = pages;
+  relay.error = error;
+  relay.delivered = events.length > 0;
+}
 export async function search(query, limit = DEFAULT_LIMIT) {
   const q = String(query || '').trim();
   const opQuery = OPERATOR_RE.test(q);
@@ -80,12 +175,15 @@ export async function search(query, limit = DEFAULT_LIMIT) {
     for (const ev of r.events) {
       if (!ev || !ev.id || seen.has(ev.id)) continue;
       seen.add(ev.id);
+      let signatureOk = false;
+      try { signatureOk = verifyEvent(ev); } catch {}
+      if (!signatureOk) { dropped++; continue; }
       let obs = null;
       try { obs = P.parseIndexEvent(ev); } catch {}
       if (!obs) { dropped++; continue; }
-      let ok = false;
-      try { ok = await P.verifyObservation(obs); } catch {}
-      if (!ok) { dropped++; continue; }
+      let observationOk = false;
+      try { observationOk = await P.verifyObservation(obs); } catch {}
+      if (!observationOk) { dropped++; continue; }
       observations++;
       let entry = docs.get(obs.d);
       if (!entry) { entry = { d: obs.d, url: obs.url, title: obs.title, description: obs.description, source: obs.source, latest: 0, indexers: new Set(), xAgree: new Map() }; docs.set(obs.d, entry); }
@@ -116,12 +214,36 @@ export async function search(query, limit = DEFAULT_LIMIT) {
       return out;
     });
 
+  const queriedRelayStates = active.map(r => ({
+    url: r.url,
+    name: r.name,
+    sip01: r.sip01,
+    delivered: r.delivered,
+    eose: !!r.eose,
+    eoseHints: r.eoseHints || [],
+    completeness: r.completeness || 'unknown',
+    pages: r.pages || 0,
+    eventCount: r.events.length,
+    error: r.error,
+  }));
+  const complete = queriedRelayStates.length > 0 &&
+    queriedRelayStates.every(r => r.completeness === 'complete');
+  const partial = queriedRelayStates.some(r =>
+    ['partial', 'timeout', 'closed', 'error', 'auth-required', 'more-available'].includes(r.completeness)
+  );
+
   return {
     version: 1,
     query: q,
-    complete: true,
+    complete,
+    partial,
+    completeness: complete ? 'complete' : partial ? 'partial' : 'unknown',
+    completenessScope: 'only the relays listed below; this does not prove global index completeness',
+    cryptographicSignatureVerification: 'nostr-tools@2.26.0 verifyEvent (NIP-01 id + BIP-340 signature)',
     pending: 0,
-    relays: active.map(r => ({ url: r.url, name: r.name, sip01: r.sip01, delivered: r.delivered, error: r.error })),
+    queriedRelays: active.length,
+    operatorsRestrictedToSIP01AwareRelays: opQuery,
+    relays: queriedRelayStates,
     generatedAt: Math.floor(Date.now() / 1000),
     documents: docs.size,
     observations,
@@ -132,7 +254,7 @@ export async function search(query, limit = DEFAULT_LIMIT) {
 
 const TOOL = {
   name: 'search',
-  description: 'Search the SIP-01 decentralized web index (Nostr kind 39697): web documents observed by independent indexers, verified and ranked by how many distinct indexers agree. Supports NIP-50 operators (site:, title:, topic:, type:, lang:, before:, after:, …) on SIP-01-aware relays.',
+  description: 'Search the SIP-01 decentralized web index (Nostr kind 39697): web documents observed by independent indexers, verified and ranked by how many distinct indexers agree. Tracks per-relay NIP-67 completeness, paginates explicit more hints (maximum 10 pages) and reports unknown/partial results honestly. Supports NIP-50 operators (site:, title:, topic:, type:, lang:, before:, after:, …) on SIP-01-aware relays.',
   inputSchema: {
     type: 'object',
     properties: {
