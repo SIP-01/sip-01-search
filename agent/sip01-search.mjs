@@ -77,9 +77,9 @@ async function queryRelayPage(url, filter, page) {
       } else if (d[0] === 'EOSE' && d[1] === subId) {
         result.eose = true;
         result.hints = Array.isArray(d[2]) ? d[2].map(String) : [];
-        if (result.hints.includes('finish')) finish('complete');
+        if (result.hints.includes('auth')) finish('auth-required', 'relay indicates more data may require AUTH');
         else if (result.hints.includes('more')) finish('more-available');
-        else if (result.hints.includes('auth')) finish('auth-required', 'relay indicates more data may require AUTH');
+        else if (result.hints.includes('finish')) finish('complete');
         else finish('unknown', 'EOSE received without a definitive NIP-67 finish hint');
       } else if (d[0] === 'CLOSED' && d[1] === subId) {
         finish('closed', d[2] || 'subscription closed before completion');
