@@ -279,6 +279,29 @@ const RELAYS = [
 const OPERATOR_RE = /(^|\s)-?(site|domain|url|inurl|title|topic|type|platform|category|network|country|mime|filetype|source|lang|before|after|distinct):/;
 const CAN_VERIFY = typeof crypto !== 'undefined' && !!crypto.subtle;
 
+// NIP-01 event ids and BIP-340 signatures are verified by the maintained
+// nostr-tools pure-JS implementation. The version is pinned; if the CDN cannot
+// load, results fail closed instead of trusting relay-supplied pubkeys.
+let nostrVerifierPromise = null;
+function loadNostrVerifier() {
+  if (!nostrVerifierPromise) {
+    const load = import('https://esm.sh/nostr-tools@2.26.0/pure?bundle').then(mod => {
+      if (typeof mod.verifyEvent !== 'function') throw new Error('nostr-tools verifyEvent export unavailable');
+      return mod.verifyEvent;
+    });
+    const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('nostr-tools verifier load timed out')), 15000));
+    nostrVerifierPromise = Promise.race([load, timeout]);
+  }
+  return nostrVerifierPromise;
+}
+
+async function verifySignedObservation(event, observation) {
+  if (!CAN_VERIFY) return { available: false, valid: false };
+  const verifyEvent = await loadNostrVerifier();
+  if (!verifyEvent(event)) return { available: true, valid: false };
+  return { available: true, valid: await verifyObservation(observation) };
+}
+
 const $status = document.getElementById('status');
 const $results = document.getElementById('results');
 const $q = document.getElementById('q');
@@ -304,7 +327,7 @@ if (jsonMode) {
 let docs = new Map();       // d → { url, title, description, source, latest, indexers:Set, xAgree:Map }
 let seen = new Set();       // event ids, deduped across relays (per search)
 let openDetails = new Set(); // d values whose "details" block is open (survives re-renders)
-let stats = { observations: 0, dropped: 0, verifying: 0 };
+let stats = { observations: 0, dropped: 0, verifying: 0, signatureChecks: 0, verificationUnavailable: false };
 let searchToken = 0;
 let currentQuery = '';
 let renderQueued = false;
@@ -457,17 +480,29 @@ function onEvent(ev) {
   let obs = null;
   try { obs = parseIndexEvent(ev); } catch (e) { obs = null; }
   if (!obs) { stats.dropped++; scheduleRender(); return; }
-  if (!CAN_VERIFY) { addObservation(obs); scheduleRender(); return; }
+  if (!CAN_VERIFY) {
+    stats.verificationUnavailable = true;
+    stats.dropped++;
+    scheduleRender();
+    return;
+  }
   stats.verifying++;
   scheduleRender();
-  verifyObservation(obs).then(ok => {
+  verifySignedObservation(ev, obs).then(result => {
     if (token !== searchToken) return;
     stats.verifying = Math.max(0, stats.verifying - 1);
-    if (ok) addObservation(obs); else stats.dropped++;
+    if (!result.available) {
+      stats.verificationUnavailable = true;
+      stats.dropped++;
+    } else {
+      stats.signatureChecks++;
+      if (result.valid) addObservation(obs); else stats.dropped++;
+    }
     scheduleRender();
   }).catch(() => {
     if (token !== searchToken) return;
     stats.verifying = Math.max(0, stats.verifying - 1);
+    stats.verificationUnavailable = true;
     stats.dropped++;
     scheduleRender();
   });
@@ -553,10 +588,10 @@ function renderJson() {
   const pendingVerifications = stats.verifying;
   const pending = pendingRelays + pendingVerifications;
   const allRelaysComplete = active.length > 0 && active.every(r => r.completeness === 'complete');
-  const allComplete = allRelaysComplete && pendingVerifications === 0;
-  const hasPartial = active.some(r => ['partial', 'pagination-limit', 'auth-required', 'timeout', 'closed'].includes(r.completeness));
+  const allComplete = allRelaysComplete && pendingVerifications === 0 && !stats.verificationUnavailable;
+  const hasPartial = stats.verificationUnavailable || active.some(r => ['partial', 'pagination-limit', 'auth-required', 'timeout', 'closed'].includes(r.completeness));
   const hasUnknown = active.some(r => r.completeness === 'unknown');
-  const completeness = pending > 0 ? 'pending' : allComplete ? 'complete' : hasPartial ? 'partial' : hasUnknown ? 'unknown' : 'unknown';
+  const completeness = pending > 0 ? 'pending' : stats.verificationUnavailable ? 'verification-unavailable' : allComplete ? 'complete' : hasPartial ? 'partial' : hasUnknown ? 'unknown' : 'unknown';
   const results = [...docs.values()]
     .sort((a, b) => b.indexers.size - a.indexers.size || b.latest - a.latest)
     .map(it => {
@@ -578,6 +613,10 @@ function renderJson() {
     pending,
     pendingRelays,
     pendingVerifications,
+    cryptographicSignatureVerification: stats.verificationUnavailable
+      ? 'unavailable'
+      : stats.signatureChecks > 0 ? 'checked' : 'no-events-verified-yet',
+    cryptographicSignatureChecks: stats.signatureChecks,
     relays: active.map(r => ({
       url: r.url, name: r.name, sip01: r.sip01, delivered: r.delivered,
       eose: r.eose, eoseHints: r.eoseHints, completeness: r.completeness,
@@ -634,7 +673,7 @@ function updateStatus() {
     if (stats.dropped) parts.push(`${stats.dropped} invalid dropped`);
     $status.textContent = `${parts.join(' · ')} from ${from}.`;
   }
-  if (!CAN_VERIFY) $status.textContent += ' Hash verification unavailable in this context.';
+  if (!CAN_VERIFY || stats.verificationUnavailable) $status.textContent += ' Cryptographic signature/content verification unavailable; results were withheld.';
 }
 
 function syncUrl(query) {
@@ -650,7 +689,7 @@ function runSearch(query) {
   docs = new Map();
   seen = new Set();
   openDetails = new Set();
-  stats = { observations: 0, dropped: 0, verifying: 0 };
+  stats = { observations: 0, dropped: 0, verifying: 0, signatureChecks: 0, verificationUnavailable: false };
   render();
   for (const relay of pool) {
     clearTimeout(relay.deadline);
