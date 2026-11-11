@@ -304,7 +304,7 @@ if (jsonMode) {
 let docs = new Map();       // d → { url, title, description, source, latest, indexers:Set, xAgree:Map }
 let seen = new Set();       // event ids, deduped across relays (per search)
 let openDetails = new Set(); // d values whose "details" block is open (survives re-renders)
-let stats = { observations: 0, dropped: 0 };
+let stats = { observations: 0, dropped: 0, verifying: 0 };
 let searchToken = 0;
 let currentQuery = '';
 let renderQueued = false;
@@ -458,12 +458,16 @@ function onEvent(ev) {
   try { obs = parseIndexEvent(ev); } catch (e) { obs = null; }
   if (!obs) { stats.dropped++; scheduleRender(); return; }
   if (!CAN_VERIFY) { addObservation(obs); scheduleRender(); return; }
+  stats.verifying++;
+  scheduleRender();
   verifyObservation(obs).then(ok => {
     if (token !== searchToken) return;
+    stats.verifying = Math.max(0, stats.verifying - 1);
     if (ok) addObservation(obs); else stats.dropped++;
     scheduleRender();
   }).catch(() => {
     if (token !== searchToken) return;
+    stats.verifying = Math.max(0, stats.verifying - 1);
     stats.dropped++;
     scheduleRender();
   });
@@ -545,8 +549,11 @@ function render() {
 function renderJson() {
   if (!$json) return;
   const active = pool.filter(r => r.active);
-  const pending = active.filter(r => r.completeness === 'pending').length;
-  const allComplete = active.length > 0 && active.every(r => r.completeness === 'complete');
+  const pendingRelays = active.filter(r => r.completeness === 'pending').length;
+  const pendingVerifications = stats.verifying;
+  const pending = pendingRelays + pendingVerifications;
+  const allRelaysComplete = active.length > 0 && active.every(r => r.completeness === 'complete');
+  const allComplete = allRelaysComplete && pendingVerifications === 0;
   const hasPartial = active.some(r => ['partial', 'pagination-limit', 'auth-required', 'timeout', 'closed'].includes(r.completeness));
   const hasUnknown = active.some(r => r.completeness === 'unknown');
   const completeness = pending > 0 ? 'pending' : allComplete ? 'complete' : hasPartial ? 'partial' : hasUnknown ? 'unknown' : 'unknown';
@@ -641,7 +648,7 @@ function runSearch(query) {
   docs = new Map();
   seen = new Set();
   openDetails = new Set();
-  stats = { observations: 0, dropped: 0 };
+  stats = { observations: 0, dropped: 0, verifying: 0 };
   render();
   for (const relay of pool) {
     clearTimeout(relay.deadline);
